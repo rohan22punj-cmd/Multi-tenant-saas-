@@ -1,0 +1,15 @@
+{
+  "name": "multi-tenant-saas",
+  "version": "1.0.0",
+  "description": "Multi-Tenant SaaS Backend with RBAC and Stripe Billing",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --forceExit --detectOpenHandles"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
