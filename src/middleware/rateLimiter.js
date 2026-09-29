@@ -14,6 +14,12 @@
  *    100 requests per 15-minute window. Enough for normal app usage
  *    but catches runaway scripts or accidental infinite loops.
  *
+ * IN TEST MODE: Rate limiting is skipped so the test suite can
+ * send as many requests as it needs without hitting fake limits.
+ * Rate limits protect against external abuse, not your own tests.
+ * We use the `skip` option (not `max: 0`, which in v7+ blocks
+ * ALL requests).
+ *
  * WHY express-rate-limit AND NOT Redis-BACKED:
  * For Phase 2, in-memory rate limiting is fine since we run one
  * server instance. In production with multiple instances behind
@@ -30,15 +36,19 @@
 
 import rateLimit from 'express-rate-limit';
 
+const isTest = process.env.NODE_ENV === 'test';
+
 /**
  * Strict limiter for auth endpoints (login, signup).
  * 15 requests per 15-minute window per IP.
+ * Skipped entirely in test mode.
  */
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,   // 15 minutes
-  max: 15,
+  limit: 15,
   standardHeaders: true,       // Return rate limit info in headers
   legacyHeaders: false,
+  skip: () => isTest,          // disable in test mode
   message: {
     status: 'error',
     message: 'Too many requests from this IP. Please try again after 15 minutes.',
@@ -48,12 +58,14 @@ export const authLimiter = rateLimit({
 /**
  * General limiter for all other API routes.
  * 100 requests per 15-minute window per IP.
+ * Skipped entirely in test mode.
  */
 export const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  limit: 100,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => isTest,
   message: {
     status: 'error',
     message: 'Too many requests from this IP. Please slow down.',

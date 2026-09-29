@@ -37,8 +37,9 @@ const tenantSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// Index on slug for fast lookups
-tenantSchema.index({ slug: 1 });
+// The `unique: true` on the slug field already creates a unique index.
+// No need for an explicit tenantSchema.index({ slug: 1 }) — that
+// would duplicate the index and Mongoose would warn about it.
 
 const Tenant = mongoose.model('Tenant', tenantSchema);
 export default Tenant;
