@@ -263,6 +263,10 @@ describe('POST /api/auth/logout', () => {
   it('invalidates the refresh token', async () => {
     // 1. Sign up
     const signup = await signupAndGetTokens();
+    // Debug: if signup failed, show why
+    if (signup.status !== 201) {
+      console.log('Signup failed in logout test:', signup.status, signup.body);
+    }
     const { accessToken, refreshToken } = signup.body.data;
 
     // 2. Logout (requires access token)
