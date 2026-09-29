@@ -9,6 +9,15 @@
  *
  * roleId points to the Role collection so we look up permissions
  * at runtime, not hard-code role names.
+ *
+ * REFRESH TOKEN ROTATION (Phase 2):
+ * tokenVersion is an integer that increments every time a new
+ * refresh token is issued. The refresh token's payload includes
+ * the version — when the server receives a refresh request, it
+ * checks that the token's version matches the user's current
+ * tokenVersion. If not, the token was already rotated out (or
+ * stolen and replayed), so we reject it. This is simpler and
+ * cheaper than storing a full token hash.
  */
 
 import mongoose from 'mongoose';
@@ -44,6 +53,11 @@ const userSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    // ─── Refresh-token rotation (Phase 2) ───
+    tokenVersion: {
+      type: Number,
+      default: 0,
     },
   },
   { timestamps: true },

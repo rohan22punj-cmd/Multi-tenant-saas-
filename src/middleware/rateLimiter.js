@@ -1,0 +1,61 @@
+/**
+ * Rate limiters — throttle requests to prevent brute-force attacks.
+ *
+ * WHAT THIS DOES:
+ * Uses express-rate-limit to cap how many requests one IP can make
+ * to a given endpoint within a time window. Two presets:
+ *
+ * 1. authLimiter  — strict, for /api/auth/login and /api/auth/signup.
+ *    15 attempts per 15-minute window. This makes brute-forcing a
+ *    password impractical without completely locking out a user who
+ *    mistyped their password a few times.
+ *
+ * 2. generalLimiter — more generous, for the rest of the API.
+ *    100 requests per 15-minute window. Enough for normal app usage
+ *    but catches runaway scripts or accidental infinite loops.
+ *
+ * WHY express-rate-limit AND NOT Redis-BACKED:
+ * For Phase 2, in-memory rate limiting is fine since we run one
+ * server instance. In production with multiple instances behind
+ * a load balancer, we'd swap to a Redis store (rate-limit-redis)
+ * so the counters are shared. The API is the same — only the
+ * `store` option changes.
+ *
+ * WHY THE LIMIT IS PER IP:
+ * We use the default keyGenerator (req.ip). For login brute-force,
+ * IP-based limiting is the standard first line of defence. If we
+ * later need per-account limiting (e.g. "lock account after 10
+ * failures"), that goes in the authService, not here.
+ */
+
+import rateLimit from 'express-rate-limit';
+
+/**
+ * Strict limiter for auth endpoints (login, signup).
+ * 15 requests per 15-minute window per IP.
+ */
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,   // 15 minutes
+  max: 15,
+  standardHeaders: true,       // Return rate limit info in headers
+  legacyHeaders: false,
+  message: {
+    status: 'error',
+    message: 'Too many requests from this IP. Please try again after 15 minutes.',
+  },
+});
+
+/**
+ * General limiter for all other API routes.
+ * 100 requests per 15-minute window per IP.
+ */
+export const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status: 'error',
+    message: 'Too many requests from this IP. Please slow down.',
+  },
+});
