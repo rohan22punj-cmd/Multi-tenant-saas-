@@ -35,6 +35,7 @@
  */
 
 import rateLimit from 'express-rate-limit';
+import env from '../config/env.js';
 
 const isTest = process.env.NODE_ENV === 'test';
 
@@ -52,6 +53,23 @@ export const authLimiter = rateLimit({
   message: {
     status: 'error',
     message: 'Too many requests from this IP. Please try again after 15 minutes.',
+  },
+});
+
+/**
+ * Strict limiter for signup only.
+ * Configurable via SIGNUP_RATE_LIMIT_WINDOW_MS and SIGNUP_RATE_LIMIT_MAX.
+ * Defaults to 5 requests per 15-minute window per IP.
+ *
+ * NOT skipped in test mode — tests verify the 429 directly.
+ */
+export const signupLimiter = rateLimit({
+  windowMs: env.signupRateLimit.windowMs,
+  limit: env.signupRateLimit.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many signup attempts, please try again later.',
   },
 });
 
