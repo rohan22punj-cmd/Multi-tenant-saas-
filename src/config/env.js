@@ -23,6 +23,10 @@ const env = {
     secretKey: process.env.STRIPE_SECRET_KEY,
     webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
   },
+  signupRateLimit: {
+    windowMs: parseInt(process.env.SIGNUP_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+    max: parseInt(process.env.SIGNUP_RATE_LIMIT_MAX, 10) || 5,
+  },
 };
 
 export default env;
