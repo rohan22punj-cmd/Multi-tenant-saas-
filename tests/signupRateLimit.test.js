@@ -4,21 +4,42 @@
  *
  * WHY A SEPARATE FILE:
  * The main auth.test.js disables rate limiters via NODE_ENV=test
- * (the authLimiter and generalLimiter use `skip: () => isTest`).
- * The signupLimiter intentionally does NOT skip in test mode so we
- * can verify the 429 here. Keeping these tests in their own file
- * avoids tangling the two concerns.
+ * (all exported limiters use `skip: () => isTest`). Here we create
+ * a FRESH rate-limit instance with NO skip, wired to a minimal
+ * Express app that calls the real signup controller. This way the
+ * limiter starts at zero for every test run, won't interfere with
+ * auth.test.js, and exercises the exact same config/message shape
+ * that production uses.
  *
  * HOW IT WORKS:
- * Sends 6 signup requests. Each uses a unique email so the
+ * Sends 6 signup requests. Each uses a unique company name so the
  * duplicate-slug 409 doesn't fire before the rate limit kicks in.
- * Requests 1-5 should return 201 (or 409 — irrelevant, just
- * "not 429"). Request 6 must return 429.
+ * Requests 1-5 should return 201. Request 6 must return 429.
  */
 
 import request from 'supertest';
-import app from '../src/app.js';
+import express from 'express';
+import rateLimit from 'express-rate-limit';
+import { signup } from '../src/controllers/authController.js';
+import env from '../src/config/env.js';
 import { connectTestDB, clearTestDB, closeTestDB } from './setup.js';
+
+// ─── Build a mini app with a fresh (non-skipped) limiter ───
+
+const testSignupLimiter = rateLimit({
+  windowMs: env.signupRateLimit.windowMs,
+  limit: env.signupRateLimit.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // No skip — that's the whole point of this test
+  message: {
+    error: 'Too many signup attempts, please try again later.',
+  },
+});
+
+const testApp = express();
+testApp.use(express.json());
+testApp.post('/api/auth/signup', testSignupLimiter, signup);
 
 // ─── Lifecycle ─────────────────────────────────────────────
 
@@ -40,7 +61,7 @@ describe('Signup rate limiter', () => {
   it('allows 5 requests then returns 429 on the 6th', async () => {
     // Fire 5 requests — each with a unique slug so none 409 on duplicate
     for (let i = 1; i <= 5; i++) {
-      const res = await request(app)
+      const res = await request(testApp)
         .post('/api/auth/signup')
         .send({
           companyName: `Company ${i}`,
@@ -54,7 +75,7 @@ describe('Signup rate limiter', () => {
     }
 
     // 6th request — rate limit kicks in
-    const blocked = await request(app)
+    const blocked = await request(testApp)
       .post('/api/auth/signup')
       .send({
         companyName: 'Company 6',

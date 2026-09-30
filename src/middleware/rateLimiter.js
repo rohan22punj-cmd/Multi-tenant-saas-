@@ -68,6 +68,7 @@ export const signupLimiter = rateLimit({
   limit: env.signupRateLimit.max,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => isTest,
   message: {
     error: 'Too many signup attempts, please try again later.',
   },
