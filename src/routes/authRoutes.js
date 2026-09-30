@@ -23,12 +23,12 @@
 import { Router } from 'express';
 import { signup, login, refreshTokens, logout } from '../controllers/authController.js';
 import protect from '../middleware/protect.js';
-import { authLimiter } from '../middleware/rateLimiter.js';
+import { authLimiter, signupLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
 
 // Public routes (no token needed, but rate-limited)
-router.post('/signup', authLimiter, signup);
+router.post('/signup', signupLimiter, signup);
 router.post('/login', authLimiter, login);
 router.post('/refresh', refreshTokens);
 
