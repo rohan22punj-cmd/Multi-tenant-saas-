@@ -35,15 +35,15 @@ const protect = async(req, _res, next) => {
 
     // 2. Verify signature + expiry
     let decoded;
-    // try {
-    //   decoded = verifyAccessToken(token);
-    // } catch (err) {
-    //   const message =
-    //     err.name === 'TokenExpiredError'
-    //       ? 'Token has expired. Please refresh your session.'
-    //       : 'Invalid token. Please log in again.';
-    //   throw new AppError(message, 401);
-    // }
+    try {
+      decoded = verifyAccessToken(token);
+    } catch (err) {
+      const message =
+        err.name === 'TokenExpiredError'
+          ? 'Token has expired. Please refresh your session.'
+          : 'Invalid token. Please log in again.';
+      throw new AppError(message, 401);
+    }
 
     // 3. Look up the role to get current permissions
     const role = await Role.findById(decoded.roleId).lean();
