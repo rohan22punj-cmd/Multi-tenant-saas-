@@ -45,15 +45,15 @@ const isTest = process.env.NODE_ENV === 'test';
  * Skipped entirely in test mode.
  */
 export const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,   // 15 minutes
-  limit: 15,
-  standardHeaders: true,       // Return rate limit info in headers
-  legacyHeaders: false,
-  skip: () => isTest,          // disable in test mode
-  message: {
-    status: 'error',
-    message: 'Too many requests from this IP. Please try again after 15 minutes.',
-  },
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    limit: 15,
+    standardHeaders: true, // Return rate limit info in headers
+    legacyHeaders: false,
+    skip: () => isTest, // disable in test mode
+    message: {
+        status: 'error',
+        message: 'Too many requests from this IP. Please try again after 15 minutes.',
+    },
 });
 
 /**
@@ -64,14 +64,14 @@ export const authLimiter = rateLimit({
  * NOT skipped in test mode — tests verify the 429 directly.
  */
 export const signupLimiter = rateLimit({
-  windowMs: env.signupRateLimit.windowMs,
-  limit: env.signupRateLimit.max,
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: () => isTest,
-  message: {
-    error: 'Too many signup attempts, please try again later.',
-  },
+    windowMs: env.signupRateLimit.windowMs,
+    limit: env.signupRateLimit.max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => isTest,
+    message: {
+        error: 'Too many signup attempts, please try again later.',
+    },
 });
 
 /**
@@ -80,13 +80,13 @@ export const signupLimiter = rateLimit({
  * Skipped entirely in test mode.
  */
 export const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: () => isTest,
-  message: {
-    status: 'error',
-    message: 'Too many requests from this IP. Please slow down.',
-  },
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => isTest,
+    message: {
+        status: 'error',
+        message: 'Too many requests from this IP. Please slow down.',
+    },
 });
