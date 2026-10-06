@@ -6,16 +6,21 @@
  * a real HTTP server. server.js imports app.js AND calls .listen().
  * This separation is a standard pattern for testable Express apps.
  *
- * PHASE 2 ADDITIONS:
- * - Auth routes mounted at /api/auth
- * - A protected /api/me endpoint for testing auth middleware
- * - General rate limiter on all /api routes
- * - Tenant context middleware on protected routes
+ * MIDDLEWARE ORDER (top → bottom):
+ * 1. requestId    — tag each request with a UUID before anything else
+ * 2. helmet       — security headers
+ * 3. cors         — cross-origin
+ * 4. express.json — body parsing
+ * 5. requestLogger — one log line per request (after finish)
+ * 6. routes + rate limiters
+ * 7. errorHandler — must be last
  */
 
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import requestId from './middleware/requestId.js';
+import requestLogger from './middleware/requestLogger.js';
 import errorHandler from './utils/errorHandler.js';
 import authRoutes from './routes/authRoutes.js';
 import protect from './middleware/protect.js';
@@ -24,10 +29,16 @@ import { generalLimiter } from './middleware/rateLimiter.js';
 
 const app = express();
 
+// ─── Request ID (must be first so all downstream middleware can use req.id) ───
+app.use(requestId);
+
 // ─── Security & parsing ───
 app.use(helmet());           // sets security-related HTTP headers
 app.use(cors());             // allows cross-origin requests (configurable later)
 app.use(express.json());     // parses JSON request bodies
+
+// ─── Request logging (after parsing, before routes) ───
+app.use(requestLogger);
 
 // ─── Health check (no auth, no rate limit) ───
 app.get('/health', (_req, res) => {
