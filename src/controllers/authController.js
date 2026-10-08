@@ -53,27 +53,27 @@ export const signup = asyncHandler(async (req, res) => {
 /**
  * POST /api/auth/login
  *
- * Body: { tenantSlug, email, password }
- * Returns: { accessToken, refreshToken }
+ * Body: { companySlug, email, password }
+ * Returns: { accessToken, refreshToken, user }
  *
- * WHY tenantSlug IS REQUIRED:
+ * WHY companySlug IS REQUIRED:
  * Email is unique per-tenant, not globally. Two different companies
- * can have "alice@example.com." Requiring the tenant slug tells us
+ * can have "alice@example.com." Requiring the company slug tells us
  * which company the user is logging into — just like Slack asks
  * "which workspace?" before asking for your email.
  */
 export const login = asyncHandler(async (req, res) => {
-  const { tenantSlug, email, password } = req.body;
+  const { companySlug, email, password } = req.body;
 
-  if (!tenantSlug || !email || !password) {
-    throw new AppError('tenantSlug, email, and password are all required', 400);
+  if (!companySlug || !email || !password) {
+    throw new AppError('companySlug, email, and password are all required', 400);
   }
 
-  const tokens = await loginService({ tenantSlug, email, password });
+  const result = await loginService({ companySlug, email, password });
 
   res.status(200).json({
     status: 'success',
-    data: tokens,
+    data: result,
   });
 });
 
