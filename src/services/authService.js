@@ -52,6 +52,10 @@ import AppError from '../utils/AppError.js';
 
 const BCRYPT_SALT_ROUNDS = 12;
 
+// Dummy hash for timing attack protection — bcrypt.compare against this
+// takes the same time as a real comparison, preventing user enumeration.
+const DUMMY_HASH = '$2a$12$dummyhashdummyhashdummyh';
+
 /**
  * The "member" role gets read-only access to projects and tasks
  * plus the ability to create and update tasks (a typical team member).
@@ -75,19 +79,21 @@ function slugify(text) {
   return text
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9]+/g, '-')   // non-alphanumeric → hyphens
-    .replace(/^-+|-+$/g, '');       // strip leading/trailing hyphens
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 /**
  * Builds the access token payload. Called by signup, login, and refresh.
  * NEVER includes password hashes or secrets.
+ * Includes permissions so the protect middleware doesn't need an extra DB call.
  */
-function buildAccessPayload(user) {
+function buildAccessPayload(user, permissions) {
   return {
     userId: user._id.toString(),
     tenantId: user.tenantId.toString(),
     roleId: user.roleId.toString(),
+    permissions,
   };
 }
 
@@ -106,8 +112,8 @@ function buildRefreshPayload(user) {
 /**
  * Signs both tokens and returns them as a plain object.
  */
-function issueTokens(user) {
-  const accessToken = signAccessToken(buildAccessPayload(user));
+function issueTokens(user, permissions) {
+  const accessToken = signAccessToken(buildAccessPayload(user, permissions));
   const refreshToken = signRefreshToken(buildRefreshPayload(user));
   return { accessToken, refreshToken };
 }
@@ -172,8 +178,8 @@ export async function signup({ companyName, adminName, email, password }) {
     roleId: adminRole._id,
   });
 
-  // 6. Issue tokens
-  const tokens = issueTokens(user);
+  // 6. Issue tokens with admin permissions
+  const tokens = issueTokens(user, adminRole.permissions);
 
   return {
     ...tokens,
@@ -186,35 +192,51 @@ export async function signup({ companyName, adminName, email, password }) {
  * Authenticates an existing user.
  *
  * @param {Object} data
- * @param {string} data.tenantSlug - identifies which company
+ * @param {string} data.companySlug - identifies which company
  * @param {string} data.email
  * @param {string} data.password
- * @returns {{ accessToken, refreshToken }}
+ * @returns {{ accessToken, refreshToken, user }}
  */
-export async function login({ tenantSlug, email, password }) {
+export async function login({ companySlug, email, password }) {
   // 1. Find the tenant
-  const tenant = await Tenant.findOne({ slug: tenantSlug });
-  if (!tenant) {
-    // Generic message — don't reveal whether the tenant exists
+  const tenant = await Tenant.findOne({ slug: companySlug });
+
+  // 2. Find the user within that tenant (if tenant exists)
+  let user = null;
+  if (tenant) {
+    user = await User.findOne({ tenantId: tenant._id, email });
+  }
+
+  // 3. Always run bcrypt.compare to prevent timing attacks.
+  // If user doesn't exist or is inactive, compare against a dummy hash.
+  const hashToCompare = (user && user.isActive) ? user.passwordHash : DUMMY_HASH;
+  const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+  // 4. If any check failed, return the SAME generic message.
+  // This prevents attackers from discovering which companies/emails exist.
+  if (!tenant || !user || !user.isActive || !passwordMatch) {
     throw new AppError('Invalid credentials', 401);
   }
 
-  // 2. Find the user within that tenant
-  const user = await User.findOne({ tenantId: tenant._id, email });
-  if (!user || !user.isActive) {
+  // 5. Fetch the role to get current permissions
+  const role = await Role.findById(user.roleId).lean();
+  if (!role) {
     throw new AppError('Invalid credentials', 401);
   }
 
-  // 3. Verify password
-  const passwordMatch = await bcrypt.compare(password, user.passwordHash);
-  if (!passwordMatch) {
-    throw new AppError('Invalid credentials', 401);
-  }
+  // 6. Issue tokens with permissions
+  const tokens = issueTokens(user, role.permissions);
 
-  // 4. Issue tokens
-  const tokens = issueTokens(user);
-
-  return tokens;
+  // 7. Return tokens + minimal user object (no password hash)
+  return {
+    ...tokens,
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: role.name,
+    },
+  };
 }
 
 /**
