@@ -57,6 +57,24 @@ export const authLimiter = rateLimit({
 });
 
 /**
+ * Login-specific rate limiter.
+ * 10 requests per 15-minute window per IP.
+ * Configurable via LOGIN_RATE_LIMIT_WINDOW_MS and LOGIN_RATE_LIMIT_MAX.
+ * Skipped in test mode (tests verify the 429 directly in a separate file).
+ */
+export const loginLimiter = rateLimit({
+    windowMs: env.loginRateLimit.windowMs,
+    limit: env.loginRateLimit.max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => isTest,
+    message: {
+        status: 'error',
+        message: 'Too many login attempts from this IP. Please try again after 15 minutes.',
+    },
+});
+
+/**
  * Strict limiter for signup only.
  * Configurable via SIGNUP_RATE_LIMIT_WINDOW_MS and SIGNUP_RATE_LIMIT_MAX.
  * Defaults to 5 requests per 15-minute window per IP.
