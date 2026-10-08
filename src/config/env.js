@@ -28,6 +28,10 @@ const env = {
     windowMs: parseInt(process.env.SIGNUP_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
     max: parseInt(process.env.SIGNUP_RATE_LIMIT_MAX, 10) || 5,
   },
+  loginRateLimit: {
+    windowMs: parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+    max: parseInt(process.env.LOGIN_RATE_LIMIT_MAX, 10) || 10,
+  },
 };
 
 export default env;
