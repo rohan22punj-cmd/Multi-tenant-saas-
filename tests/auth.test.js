@@ -112,9 +112,9 @@ describe('POST /api/auth/login', () => {
     await signupAndGetTokens();
   });
 
-  it('succeeds with correct credentials (tenantSlug + email + password)', async () => {
+  it('succeeds with correct credentials (companySlug + email + password)', async () => {
     const res = await request(app).post('/api/auth/login').send({
-      tenantSlug: 'acme-corp',
+      companySlug: 'acme-corp',
       email: 'alice@acme.com',
       password: 'SecureP@ss123',
     });
@@ -122,11 +122,27 @@ describe('POST /api/auth/login', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
     expect(res.body.data.refreshToken).toBeDefined();
+    expect(res.body.data.user).toBeDefined();
+    expect(res.body.data.user.id).toBeDefined();
+    expect(res.body.data.user.name).toBe('Alice Admin');
+    expect(res.body.data.user.email).toBe('alice@acme.com');
+    expect(res.body.data.user.role).toBe('admin');
+
+    // Access token payload has userId, tenantId, and permissions
+    const decoded = jwt.verify(
+      res.body.data.accessToken,
+      env.jwt.accessSecret,
+    );
+    expect(decoded.userId).toBeDefined();
+    expect(decoded.tenantId).toBeDefined();
+    expect(decoded.permissions).toBeInstanceOf(Array);
+    expect(decoded.permissions.length).toBeGreaterThan(0);
+    expect(decoded.passwordHash).toBeUndefined();
   });
 
   it('fails with 401 when the password is wrong', async () => {
     const res = await request(app).post('/api/auth/login').send({
-      tenantSlug: 'acme-corp',
+      companySlug: 'acme-corp',
       email: 'alice@acme.com',
       password: 'WrongPassword',
     });
@@ -135,9 +151,20 @@ describe('POST /api/auth/login', () => {
     expect(res.body.message).toBe('Invalid credentials');
   });
 
-  it('fails with 401 when the tenant slug is wrong', async () => {
+  it('fails with 401 with the SAME message when the email is wrong', async () => {
     const res = await request(app).post('/api/auth/login').send({
-      tenantSlug: 'nonexistent-company',
+      companySlug: 'acme-corp',
+      email: 'nonexistent@acme.com',
+      password: 'SecureP@ss123',
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Invalid credentials');
+  });
+
+  it('fails with 401 with the SAME message when the companySlug is wrong', async () => {
+    const res = await request(app).post('/api/auth/login').send({
+      companySlug: 'nonexistent-company',
       email: 'alice@acme.com',
       password: 'SecureP@ss123',
     });
@@ -149,10 +176,63 @@ describe('POST /api/auth/login', () => {
   it('fails with 400 when required fields are missing', async () => {
     const res = await request(app).post('/api/auth/login').send({
       email: 'alice@acme.com',
-      // missing tenantSlug and password
+      // missing companySlug and password
     });
 
     expect(res.status).toBe(400);
+  });
+
+  it('allows same email in different companies to log in to their own tenant', async () => {
+    // Create a second tenant with the same email
+    await request(app)
+      .post('/api/auth/signup')
+      .send({
+        companyName: 'Beta Inc',
+        adminName: 'Bob Admin',
+        email: 'alice@acme.com', // SAME email
+        password: 'SecureP@ss123',
+      });
+
+    // Login to first company
+    const res1 = await request(app).post('/api/auth/login').send({
+      companySlug: 'acme-corp',
+      email: 'alice@acme.com',
+      password: 'SecureP@ss123',
+    });
+
+    // Login to second company
+    const res2 = await request(app).post('/api/auth/login').send({
+      companySlug: 'beta-inc',
+      email: 'alice@acme.com',
+      password: 'SecureP@ss123',
+    });
+
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+
+    // Each token should have its own tenantId
+    const decoded1 = jwt.verify(res1.body.data.accessToken, env.jwt.accessSecret);
+    const decoded2 = jwt.verify(res2.body.data.accessToken, env.jwt.accessSecret);
+
+    expect(decoded1.tenantId).not.toBe(decoded2.tenantId);
+    expect(decoded1.userId).not.toBe(decoded2.userId);
+  });
+
+  it('rejects login for a deactivated user', async () => {
+    // First, deactivate the user
+    const User = (await import('../src/models/User.js')).default;
+    const user = await User.findOne({ email: 'alice@acme.com' });
+    user.isActive = false;
+    await user.save();
+
+    const res = await request(app).post('/api/auth/login').send({
+      companySlug: 'acme-corp',
+      email: 'alice@acme.com',
+      password: 'SecureP@ss123',
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Invalid credentials');
   });
 });
 
