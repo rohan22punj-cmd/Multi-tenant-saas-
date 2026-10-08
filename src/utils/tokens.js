@@ -26,7 +26,7 @@ import env from '../config/env.js';
 
 /**
  * Signs a short-lived access token.
- * Payload will include: userId, tenantId, roleId
+ * Payload will include: userId, tenantId, roleId, permissions
  */
 export function signAccessToken(payload) {
   return jwt.sign(payload, env.jwt.accessSecret, {

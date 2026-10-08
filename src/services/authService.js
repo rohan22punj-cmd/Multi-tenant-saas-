@@ -273,8 +273,14 @@ export async function refresh(refreshToken) {
   user.tokenVersion += 1;
   await user.save();
 
-  // 5. Issue fresh tokens (with the new tokenVersion baked in)
-  const tokens = issueTokens(user);
+  // 5. Fetch the role to get current permissions
+  const role = await Role.findById(user.roleId).lean();
+  if (!role) {
+    throw new AppError('Invalid or expired refresh token', 401);
+  }
+
+  // 6. Issue fresh tokens with permissions
+  const tokens = issueTokens(user, role.permissions);
 
   return tokens;
 }
