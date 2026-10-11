@@ -110,13 +110,15 @@ function buildAccessPayload(user, permissions) {
 
 /**
  * Builds the refresh token payload.
- * Only carries userId and tenantId — the hash comparison replaces
- * the old tokenVersion approach for rotation detection.
+ * Includes a random jti so every issued refresh token is unique,
+ * preventing accidental hash collisions when two tokens are created
+ * within the same second.
  */
 function buildRefreshPayload(user) {
   return {
     userId: user._id.toString(),
     tenantId: user.tenantId.toString(),
+    jti: crypto.randomUUID(),
   };
 }
 
