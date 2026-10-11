@@ -101,11 +101,16 @@ export const refreshTokens = asyncHandler(async (req, res) => {
 /**
  * POST /api/auth/logout
  *
- * Requires a valid access token (protect middleware).
- * Invalidates the user's refresh token by bumping tokenVersion.
+ * Body: { refreshToken }
+ * Always returns 200 — logout should never show an error.
+ * Clears the stored hash so the refresh token can never be reused.
  */
 export const logout = asyncHandler(async (req, res) => {
-  await logoutService(req.user.userId);
+  const { refreshToken } = req.body;
+
+  // Even if refreshToken is missing or garbage, we return 200.
+  // The service handles this gracefully.
+  await logoutService(refreshToken || '');
 
   res.status(200).json({
     status: 'success',

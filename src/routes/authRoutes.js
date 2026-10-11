@@ -7,12 +7,12 @@
  *
  * - signup and login get the AUTH rate limiter (15 req / 15 min)
  *   to slow down brute-force attempts.
- * - logout sits behind the protect middleware because you need
- *   a valid access token to log out (otherwise anyone could
- *   invalidate someone else's session).
  * - refresh does NOT require the protect middleware because the
  *   access token may have expired — that's the whole point of
  *   refreshing. It validates via the refresh token itself.
+ * - logout does NOT require the protect middleware either. It takes
+ *   the refresh token in the body and clears the stored hash.
+ *   Always returns 200 so the client never sees an error on logout.
  *
  * WHY A SEPARATE ROUTES FILE:
  * Routes are wiring — they connect URLs to handlers. Keeping them
@@ -22,7 +22,6 @@
 
 import { Router } from 'express';
 import { signup, login, refreshTokens, logout } from '../controllers/authController.js';
-import protect from '../middleware/protect.js';
 import { signupLimiter, loginLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
@@ -31,8 +30,6 @@ const router = Router();
 router.post('/signup', signupLimiter, signup);
 router.post('/login', loginLimiter, login);
 router.post('/refresh', refreshTokens);
-
-// Protected route (requires valid access token)
-router.post('/logout', protect, logout);
+router.post('/logout', logout);
 
 export default router;

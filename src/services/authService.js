@@ -19,25 +19,28 @@
  *    with basic permissions)
  * 4. Hash the password with bcrypt (salt rounds = 12)
  * 5. Create the first User with the "admin" role
- * 6. Sign and return access + refresh tokens
+ * 6. Sign tokens, store SHA-256 hash of the refresh token
  *
  * LOGIN FLOW:
  * 1. Look up the Tenant by slug
  * 2. Find the User by { tenantId, email }
  * 3. Compare bcrypt hash
- * 4. Sign and return tokens
+ * 4. Sign tokens, store SHA-256 hash of the refresh token
  *
- * REFRESH FLOW:
+ * REFRESH FLOW (rotation with reuse detection):
  * 1. Verify the refresh token's signature and expiry
- * 2. Check that its tokenVersion matches the user's current version
- *    (if not, the token was already rotated out → reject)
- * 3. Increment tokenVersion (invalidates the old refresh token)
- * 4. Sign and return NEW access + refresh tokens
+ * 2. Hash the incoming token and compare it with the stored hash
+ * 3. If it MATCHES: issue new tokens, replace the stored hash
+ * 4. If it DOESN'T MATCH: someone is reusing an old token — clear
+ *    the stored hash so ALL sessions for that user are killed
  *
  * LOGOUT FLOW:
- * 1. Increment tokenVersion so the current refresh token is invalid
+ * 1. Try to decode the refresh token (don't care if it fails)
+ * 2. If valid, clear the stored hash so it can never be used again
+ * 3. Always succeed — logout should never show an error to the user
  */
 
+import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import Tenant from '../models/Tenant.js';
 import Role from '../models/Role.js';
@@ -72,6 +75,14 @@ const MEMBER_PERMISSIONS = [
 // ──────────────────────────────────────────────────────────────
 
 /**
+ * Returns the SHA-256 hex digest of a string.
+ * Used to hash refresh tokens before storing them.
+ */
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/**
  * Converts a company name into a URL-safe slug.
  * "Acme Corp!" → "acme-corp"
  */
@@ -99,22 +110,28 @@ function buildAccessPayload(user, permissions) {
 
 /**
  * Builds the refresh token payload.
- * Includes tokenVersion so we can detect reused (rotated-out) tokens.
+ * Only carries userId and tenantId — the hash comparison replaces
+ * the old tokenVersion approach for rotation detection.
  */
 function buildRefreshPayload(user) {
   return {
     userId: user._id.toString(),
     tenantId: user.tenantId.toString(),
-    tokenVersion: user.tokenVersion,
   };
 }
 
 /**
- * Signs both tokens and returns them as a plain object.
+ * Signs both tokens, stores the refresh token hash on the user,
+ * and returns the raw tokens.
  */
-function issueTokens(user, permissions) {
+async function issueAndStoreTokens(user, permissions) {
   const accessToken = signAccessToken(buildAccessPayload(user, permissions));
   const refreshToken = signRefreshToken(buildRefreshPayload(user));
+
+  // Store the SHA-256 hash, never the raw token
+  user.refreshTokenHash = hashToken(refreshToken);
+  await user.save();
+
   return { accessToken, refreshToken };
 }
 
@@ -178,8 +195,8 @@ export async function signup({ companyName, adminName, email, password }) {
     roleId: adminRole._id,
   });
 
-  // 6. Issue tokens with admin permissions
-  const tokens = issueTokens(user, adminRole.permissions);
+  // 6. Issue tokens and store refresh token hash
+  const tokens = await issueAndStoreTokens(user, adminRole.permissions);
 
   return {
     ...tokens,
@@ -224,8 +241,8 @@ export async function login({ companySlug, email, password }) {
     throw new AppError('Invalid credentials', 401);
   }
 
-  // 6. Issue tokens with permissions
-  const tokens = issueTokens(user, role.permissions);
+  // 6. Issue tokens and store refresh token hash
+  const tokens = await issueAndStoreTokens(user, role.permissions);
 
   // 7. Return tokens + minimal user object (no password hash)
   return {
@@ -241,55 +258,79 @@ export async function login({ companySlug, email, password }) {
 
 /**
  * Issues new tokens using a valid refresh token.
- * Implements ROTATION: the old refresh token is invalidated by
- * incrementing tokenVersion.
+ * Implements ROTATION with reuse detection:
+ *
+ * - Hash matches stored hash → issue new tokens, replace hash
+ * - Hash does NOT match → old token reuse detected, wipe the
+ *   stored hash so ALL sessions for this user are killed
+ *
+ * Every rejection returns the same generic message to avoid
+ * leaking information about why the token was rejected.
  *
  * @param {string} refreshToken
  * @returns {{ accessToken, refreshToken }}
  */
 export async function refresh(refreshToken) {
+  const GENERIC_MSG = 'Invalid refresh token';
+
   // 1. Verify signature and expiry
   let decoded;
   try {
     decoded = verifyRefreshToken(refreshToken);
   } catch {
-    throw new AppError('Invalid or expired refresh token', 401);
+    throw new AppError(GENERIC_MSG, 401);
   }
 
   // 2. Find the user
   const user = await User.findById(decoded.userId);
   if (!user || !user.isActive) {
-    throw new AppError('Invalid or expired refresh token', 401);
+    throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 3. Check token version (rotation guard)
-  if (decoded.tokenVersion !== user.tokenVersion) {
-    // Token was already used (rotated out) or tampered with.
-    // This could mean someone stole and replayed an old refresh token.
-    throw new AppError('Refresh token has been revoked', 401);
+  // 3. Check that the tenant still exists
+  const tenant = await Tenant.findById(user.tenantId);
+  if (!tenant) {
+    throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 4. Rotate: increment version, invalidating the old refresh token
-  user.tokenVersion += 1;
-  await user.save();
+  // 4. Hash the incoming token and compare with stored hash
+  const incomingHash = hashToken(refreshToken);
+
+  if (user.refreshTokenHash !== incomingHash) {
+    // REUSE DETECTED — an old (already-rotated) token is being replayed.
+    // Wipe the stored hash so even the newest token stops working.
+    // This is the safety measure: if an attacker stole the old token,
+    // nuking everything forces the real user to re-login (annoying but safe).
+    user.refreshTokenHash = null;
+    await user.save();
+    throw new AppError(GENERIC_MSG, 401);
+  }
 
   // 5. Fetch the role to get current permissions
   const role = await Role.findById(user.roleId).lean();
   if (!role) {
-    throw new AppError('Invalid or expired refresh token', 401);
+    throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 6. Issue fresh tokens with permissions
-  const tokens = issueTokens(user, role.permissions);
+  // 6. Issue fresh tokens (this also replaces the stored hash)
+  const tokens = await issueAndStoreTokens(user, role.permissions);
 
   return tokens;
 }
 
 /**
- * Invalidates the current refresh token by bumping tokenVersion.
+ * Invalidates the refresh token by clearing the stored hash.
+ * Always succeeds — logout should never show an error to the user.
  *
- * @param {string} userId
+ * @param {string} refreshToken
  */
-export async function logout(userId) {
-  await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
+export async function logout(refreshToken) {
+  // Best-effort: try to decode the token to find the user.
+  // If it's garbage or expired, we just do nothing — still return success.
+  try {
+    const decoded = verifyRefreshToken(refreshToken);
+    await User.findByIdAndUpdate(decoded.userId, { refreshTokenHash: null });
+  } catch {
+    // Token is garbage or expired — nothing to clear, that's fine.
+  }
 }
