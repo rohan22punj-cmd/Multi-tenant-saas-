@@ -1,6 +1,7 @@
 /**
  * Auth integration tests — tests the full HTTP flow for signup,
- * login, protected routes, token refresh, and logout.
+ * login, protected routes, token refresh (with rotation + reuse
+ * detection), and logout.
  *
  * WHAT THIS TESTS:
  * 1. Signup creates a tenant + admin user, returns tokens
@@ -9,8 +10,15 @@
  * 4. Login with wrong password fails with 401
  * 5. Protected route without a token fails with 401
  * 6. Protected route with an expired/invalid token fails with 401
- * 7. Refresh token flow issues a valid new access token
- * 8. Refresh with an old/reused (rotated-out) token fails
+ * 7. Refresh with a valid token returns new access + refresh tokens
+ * 8. New access token has correct userId/tenantId/permissions
+ * 9. Using the OLD refresh token after rotation returns 401
+ * 10. After that reuse, even the NEWEST token stops working (safety wipe)
+ * 11. Refresh with a garbage token returns 401
+ * 12. Refresh for a deactivated user returns 401
+ * 13. Logout makes the refresh token unusable
+ * 14. Logout with a garbage token still returns 200
+ * 15. Refresh token can't be used as access token, and vice versa
  *
  * HOW IT WORKS:
  * Uses mongodb-memory-server so we don't need a real database.
@@ -285,12 +293,10 @@ describe('GET /api/me (protected route)', () => {
 });
 
 describe('POST /api/auth/refresh', () => {
-  it('issues a valid new access token (and a new refresh token)', async () => {
-    // 1. Sign up to get initial tokens
+  it('returns 200 with new access and refresh tokens', async () => {
     const signup = await signupAndGetTokens();
     const oldRefreshToken = signup.body.data.refreshToken;
 
-    // 2. Use the refresh token to get new tokens
     const res = await request(app).post('/api/auth/refresh').send({
       refreshToken: oldRefreshToken,
     });
@@ -298,65 +304,162 @@ describe('POST /api/auth/refresh', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
     expect(res.body.data.refreshToken).toBeDefined();
-
-    // The new tokens should be different from the old ones
     expect(res.body.data.refreshToken).not.toBe(oldRefreshToken);
-
-    // 3. The new access token should work on a protected route
-    const meRes = await request(app)
-      .get('/api/me')
-      .set('Authorization', `Bearer ${res.body.data.accessToken}`);
-
-    expect(meRes.status).toBe(200);
   });
 
-  it('fails with 401 when using an old (rotated-out) refresh token', async () => {
-    // 1. Sign up
+  it('new access token has the right userId, tenantId, and permissions', async () => {
+    const signup = await signupAndGetTokens();
+    const oldRefreshToken = signup.body.data.refreshToken;
+
+    // Decode the original access token for comparison
+    const originalDecoded = jwt.verify(
+      signup.body.data.accessToken,
+      env.jwt.accessSecret,
+    );
+
+    const res = await request(app).post('/api/auth/refresh').send({
+      refreshToken: oldRefreshToken,
+    });
+
+    const newDecoded = jwt.verify(
+      res.body.data.accessToken,
+      env.jwt.accessSecret,
+    );
+
+    expect(newDecoded.userId).toBe(originalDecoded.userId);
+    expect(newDecoded.tenantId).toBe(originalDecoded.tenantId);
+    expect(newDecoded.permissions).toEqual(originalDecoded.permissions);
+  });
+
+  it('rejects the OLD refresh token after rotation (returns 401)', async () => {
     const signup = await signupAndGetTokens();
     const firstRefreshToken = signup.body.data.refreshToken;
 
-    // 2. Refresh once — this rotates the token (bumps tokenVersion)
+    // Refresh once — rotates the token
     const refresh1 = await request(app).post('/api/auth/refresh').send({
       refreshToken: firstRefreshToken,
     });
     expect(refresh1.status).toBe(200);
 
-    // 3. Try to use the OLD (rotated-out) refresh token again
+    // Try the OLD token again
     const res = await request(app).post('/api/auth/refresh').send({
       refreshToken: firstRefreshToken,
     });
 
     expect(res.status).toBe(401);
-    expect(res.body.message).toMatch(/revoked/i);
+    expect(res.body.message).toBe('Invalid refresh token');
   });
 
-  it('fails with 401 when the refresh token is garbage', async () => {
+  it('after reuse of old token, even the NEWEST refresh token stops working (safety wipe)', async () => {
+    const signup = await signupAndGetTokens();
+    const firstRefreshToken = signup.body.data.refreshToken;
+
+    // Refresh to get the second token
+    const refresh1 = await request(app).post('/api/auth/refresh').send({
+      refreshToken: firstRefreshToken,
+    });
+    expect(refresh1.status).toBe(200);
+    const secondRefreshToken = refresh1.body.data.refreshToken;
+
+    // Reuse the OLD token (triggers the safety wipe)
+    const reuse = await request(app).post('/api/auth/refresh').send({
+      refreshToken: firstRefreshToken,
+    });
+    expect(reuse.status).toBe(401);
+
+    // Now even the NEWEST token should be dead
+    const res = await request(app).post('/api/auth/refresh').send({
+      refreshToken: secondRefreshToken,
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Invalid refresh token');
+  });
+
+  it('rejects a garbage token with 401', async () => {
     const res = await request(app).post('/api/auth/refresh').send({
       refreshToken: 'not.a.real.token',
     });
 
     expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Invalid refresh token');
+  });
+
+  it('rejects refresh for a deactivated user with 401', async () => {
+    const signup = await signupAndGetTokens();
+
+    // Deactivate the user
+    const User = (await import('../src/models/User.js')).default;
+    const user = await User.findOne({ email: 'alice@acme.com' });
+    user.isActive = false;
+    await user.save();
+
+    const res = await request(app).post('/api/auth/refresh').send({
+      refreshToken: signup.body.data.refreshToken,
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Invalid refresh token');
+  });
+
+  it('a refresh token cannot be used as an access token', async () => {
+    const signup = await signupAndGetTokens();
+    const refreshToken = signup.body.data.refreshToken;
+
+    // Try using the refresh token as a Bearer token on a protected route
+    const res = await request(app)
+      .get('/api/me')
+      .set('Authorization', `Bearer ${refreshToken}`);
+
+    // Should fail — refresh token is signed with a different secret
+    expect(res.status).toBe(401);
+  });
+
+  it('an access token cannot be used as a refresh token', async () => {
+    const signup = await signupAndGetTokens();
+    const accessToken = signup.body.data.accessToken;
+
+    // Try using the access token as a refresh token
+    const res = await request(app).post('/api/auth/refresh').send({
+      refreshToken: accessToken,
+    });
+
+    // Should fail — access token is signed with a different secret
+    expect(res.status).toBe(401);
   });
 });
 
 describe('POST /api/auth/logout', () => {
-  it('invalidates the refresh token', async () => {
-    // 1. Sign up
+  it('makes the refresh token unusable afterwards', async () => {
     const signup = await signupAndGetTokens();
-    const { accessToken, refreshToken } = signup.body.data;
+    const { refreshToken } = signup.body.data;
 
-    // 2. Logout (requires access token)
-    const logoutRes = await request(app)
-      .post('/api/auth/logout')
-      .set('Authorization', `Bearer ${accessToken}`);
+    // Logout
+    const logoutRes = await request(app).post('/api/auth/logout').send({
+      refreshToken,
+    });
 
     expect(logoutRes.status).toBe(200);
 
-    // 3. The old refresh token should no longer work
+    // The refresh token should no longer work
     const refreshRes = await request(app).post('/api/auth/refresh').send({
       refreshToken,
     });
 
     expect(refreshRes.status).toBe(401);
+  });
+
+  it('returns 200 even with a garbage token', async () => {
+    const res = await request(app).post('/api/auth/logout').send({
+      refreshToken: 'total.garbage.token',
+    });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 200 even with no token at all', async () => {
+    const res = await request(app).post('/api/auth/logout').send({});
+
+    expect(res.status).toBe(200);
   });
 });
