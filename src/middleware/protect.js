@@ -5,61 +5,57 @@
  * 1. Reads the access token from the Authorization header
  *    (format: "Bearer <token>")
  * 2. Verifies the JWT signature and checks that it hasn't expired
- * 3. Loads the user's permissions from the Role collection
- * 4. Attaches userId, tenantId, roleId, and permissions to req.user
- *    so downstream controllers and services can use them
+ *    using the ACCESS secret (a refresh token will fail here).
+ * 3. Takes userId, tenantId, roleId, permissions directly from the
+ *    token payload — NO database call. This is fast (no extra round-
+ *    trip) but means a deactivated user keeps access for up to
+ *    15 minutes until the token expires. That trade-off is intentional
+ *    for Phase 2; we can add a revocation list later if needed.
+ * 4. Attaches req.user = { userId, tenantId, roleId, permissions }.
+ * 5. Runs the rest of the request inside runWithTenant({ tenantId,
+ *    userId }) so downstream code can call getTenantId().
  *
- * WHY WE LOAD PERMISSIONS HERE:
- * The access token contains roleId (not the full permission list)
- * to keep it small. We do one quick DB lookup per request to get
- * the current permissions. This means if an admin changes a role's
- * permissions, the change takes effect immediately — not after the
- * user's token expires.
- *
- * If this becomes a performance concern, we can cache the
- * permissions in Redis with a short TTL.
+ * SAFETY RULE:
+ * tenantId must never be read from req.body, req.params, or req.query
+ * anywhere in this project.
  */
 
 import { verifyAccessToken } from '../utils/tokens.js';
-import Role from '../models/Role.js';
 import AppError from '../utils/AppError.js';
+import { runWithTenant } from '../utils/tenantContext.js';
 
-const protect = async(req, _res, next) => {
-    // 1. Extract the token from the Authorization header
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        throw new AppError('Authentication required. Please provide a valid token.', 401);
-    }
+const UNAUTHORIZED = 'Unauthorized';
 
-    const token = authHeader.split(' ')[1];
+const protect = async (req, _res, next) => {
+  // 1. Extract the token from the Authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new AppError(UNAUTHORIZED, 401);
+  }
 
-    // 2. Verify signature + expiry
-    let decoded;
-    try {
-      decoded = verifyAccessToken(token);
-    } catch (err) {
-      const message =
-        err.name === 'TokenExpiredError'
-          ? 'Token has expired. Please refresh your session.'
-          : 'Invalid token. Please log in again.';
-      throw new AppError(message, 401);
-    }
+  const token = authHeader.split(' ')[1];
 
-    // 3. Look up the role to get current permissions
-    const role = await Role.findById(decoded.roleId).lean();
-    if (!role) {
-        throw new AppError('Role associated with this token no longer exists.', 401);
-    }
+  // 2. Verify signature + expiry (access secret)
+  let decoded;
+  try {
+    decoded = verifyAccessToken(token);
+  } catch {
+    throw new AppError(UNAUTHORIZED, 401);
+  }
 
-    // 4. Attach user context for downstream handlers
-    req.user = {
-        userId: decoded.userId,
-        tenantId: decoded.tenantId,
-        roleId: decoded.roleId,
-        permissions: role.permissions,
-    };
+  // 3. Build req.user from token payload (no DB lookup)
+  req.user = {
+    userId: decoded.userId,
+    tenantId: decoded.tenantId,
+    roleId: decoded.roleId,
+    permissions: decoded.permissions || [],
+  };
 
-    next();
+  // 4. Run downstream inside async tenant context
+  runWithTenant(
+    { tenantId: decoded.tenantId, userId: decoded.userId },
+    () => next()
+  );
 };
 
 export default protect;

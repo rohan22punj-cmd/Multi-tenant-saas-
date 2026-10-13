@@ -60,9 +60,9 @@ describe('POST /api/auth/refresh', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
     expect(res.body.data.refreshToken).toBeDefined();
-    // New tokens must differ from old ones
-    expect(res.body.data.accessToken).not.toBe(accessToken);
+    // New refresh token must differ (rotation)
     expect(res.body.data.refreshToken).not.toBe(refreshToken);
+    // Access token may be identical if issued within the same second; that's fine.
   });
 
   it('new access token carries correct payload (userId, tenantId, permissions)', async () => {
