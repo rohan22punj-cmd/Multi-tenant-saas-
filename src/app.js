@@ -25,6 +25,7 @@ import errorHandler from './utils/errorHandler.js';
 import authRoutes from './routes/authRoutes.js';
 import protect from './middleware/protect.js';
 import tenantContextMiddleware from './middleware/tenantContext.js';
+import { getTenantId } from './utils/tenantContext.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 
 const app = express();
@@ -56,11 +57,14 @@ app.use('/api/auth', authRoutes);
 // In Phase 3+, all resource routes (projects, tasks) will use
 // the same middleware chain.
 app.get('/api/me', protect, tenantContextMiddleware, (req, res) => {
+  // getTenantId() reads from AsyncLocalStorage, proving context works
+  const contextTenantId = getTenantId();
   res.status(200).json({
     status: 'success',
     data: {
       userId: req.user.userId,
       tenantId: req.user.tenantId,
+      contextTenantId,
       permissions: req.user.permissions,
     },
   });
