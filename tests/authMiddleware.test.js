@@ -98,27 +98,15 @@ describe('GET /api/me (protected)', () => {
     expect(res.body.message).toBe('Unauthorized');
   });
 
-  it('tampered token (changed tenantId) returns 401', async () => {
-    const decoded = jwt.decode(tokenA);
-    // modify tenantId
-    decoded.tenantId = '000000000000000000000000';
-    // re-sign with SAME secret? Actually we cannot re-sign without secret.
-    // Instead create a token with altered payload but valid signature? Not possible.
-    // We'll create a token with different payload signed with same secret.
-    const tampered = jwt.sign(
-      { ...decoded, tenantId: '000000000000000000000000' },
-      env.jwt.accessSecret,
-      { expiresIn: '15m' }
-    );
-    const res = await getMe(tampered);
-    // This will be valid signature but different tenantId – still accepted by middleware.
-    // Requirement: token with tampered payload but old signature => 401.
-    // To test old signature, we can take tokenA, split, modify middle part, keep signature -> invalid signature.
+  it('tampered token (changed tenantId, signature broken) returns 401', async () => {
+    // Take a valid token, alter the payload part, keep original signature → invalid.
     const parts = tokenA.split('.');
-    const tampered2 = `${parts[0]}.${Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(parts[1], 'base64').toString()), tenantId: '000000000000000000000000' })).toString('base64')}.${parts[2]}`;
-    const res2 = await getMe(tampered2);
-    expect(res2.status).toBe(401);
-    expect(res2.body.message).toBe('Unauthorized');
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+    payload.tenantId = '000000000000000000000000';
+    const tampered = `${parts[0]}.${Buffer.from(JSON.stringify(payload)).toString('base64')}.${parts[2]}`;
+    const res = await getMe(tampered);
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Unauthorized');
   });
 
   it('refresh token used as access token returns 401', async () => {

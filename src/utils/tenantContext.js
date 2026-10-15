@@ -22,8 +22,12 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import logger from '../config/logger.js';
 
 const asyncLocalStorage = new AsyncLocalStorage();
+
+// Internal flag to track when we're intentionally running unscoped
+let unscopedDepth = 0;
 
 /**
  * Runs the given callback inside an async context that carries
@@ -43,6 +47,11 @@ export function runWithTenant(context, callback) {
  * This prevents silent undefined bugs that leak data.
  */
 export function getTenantId() {
+  if (unscopedDepth > 0) {
+    // Inside runUnscoped — return undefined so the plugin knows
+    // not to apply a filter. The plugin checks isUnscoped() instead.
+    return undefined;
+  }
   const store = asyncLocalStorage.getStore();
   if (!store?.tenantId) {
     throw new Error(
@@ -55,9 +64,13 @@ export function getTenantId() {
 
 /**
  * Returns the full context object (tenantId, userId, …) for the
- * current request. Throws if no context is set.
+ * current request. Returns undefined if inside runUnscoped.
+ * Throws if no context is set and not unscoped.
  */
 export function getContext() {
+  if (unscopedDepth > 0) {
+    return undefined;
+  }
   const store = asyncLocalStorage.getStore();
   if (!store) {
     throw new Error(
@@ -65,6 +78,57 @@ export function getContext() {
     );
   }
   return store;
+}
+
+/**
+ * Checks if we are currently inside a runUnscoped block.
+ * Used by the tenant plugin to skip tenant filtering.
+ */
+export function isUnscoped() {
+  return unscopedDepth > 0;
+}
+
+/**
+ * ESCAPE HATCH — runs a callback WITHOUT any tenant filter.
+ *
+ * WHAT THIS DOES:
+ * Temporarily disables the tenant context so Mongoose queries run
+ * unfiltered (see ALL tenants' data). This is DANGEROUS and should
+ * only be used for:
+ *   - System-level operations (migrations, seeding, cron jobs)
+ *   - Cross-tenant analytics/reporting (with strict access control)
+ *   - Operations on the Tenant model itself (which has no tenantId)
+ *
+ * WHY IT EXISTS:
+ * The Tenant model has no tenantId — it IS the tenant. Creating or
+ * looking up tenants by slug must run unscoped. A few other rare
+ * system cases also need it.
+ *
+ * SAFETY MEASURES:
+ * - reason (string) is REQUIRED — forces the developer to justify it
+ * - Logs a WARNING with the reason so every usage is auditable
+ * - Single function name (runUnscoped) makes it trivial to grep:
+ *     grep -r "runUnscoped" src/
+ * - Nesting is tracked so nested calls work correctly
+ *
+ * @param {string} reason - REQUIRED human-readable justification
+ * @param {Function} callback - async function to run unscoped
+ * @returns {Promise<*>} - whatever the callback returns
+ */
+export async function runUnscoped(reason, callback) {
+  if (!reason || typeof reason !== 'string' || !reason.trim()) {
+    throw new Error('runUnscoped() requires a non-empty reason string');
+  }
+
+  unscopedDepth++;
+  logger.warn({ reason, unscopedDepth }, 'runUnscoped: executing without tenant filter');
+
+  try {
+    // Run with an empty store (no tenantId) — getTenantId will return undefined
+    return await asyncLocalStorage.run({}, callback);
+  } finally {
+    unscopedDepth--;
+  }
 }
 
 export default asyncLocalStorage;

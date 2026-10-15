@@ -272,7 +272,7 @@ describe('GET /api/me (protected route)', () => {
       .set('Authorization', `Bearer ${expiredToken}`);
 
     expect(res.status).toBe(401);
-    expect(res.body.message).toMatch(/expired/i);
+    expect(res.body.message).toBe('Unauthorized');
   });
 
   it('succeeds with a valid access token', async () => {
