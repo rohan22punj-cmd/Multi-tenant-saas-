@@ -145,6 +145,10 @@ export function tenantPlugin(schema) {
   // ──────────────────────────────────────────────────────────────
   for (const method of READ_METHODS) {
     schema.pre(method, function (next) {
+      // If unscoped, skip tenant filtering entirely
+      if (isUnscoped()) {
+        return next();
+      }
       // `this` is the Query object for static methods, Document for instance methods
       const tenantId = getTenantId();
 
@@ -179,6 +183,9 @@ export function tenantPlugin(schema) {
   // d) aggregate — inject $match as first stage (unless $geoNear)
   // ──────────────────────────────────────────────────────────────
   schema.pre('aggregate', function (next) {
+    if (isUnscoped()) {
+      return next();
+    }
     const tenantId = getTenantId();
     const pipeline = this.pipeline();
     injectAggregateMatch(pipeline, tenantId);
@@ -189,6 +196,9 @@ export function tenantPlugin(schema) {
   // e) WRITES of new documents — save, create, insertMany
   // ──────────────────────────────────────────────────────────────
   schema.pre('save', function (next) {
+    if (isUnscoped()) {
+      return next();
+    }
     const tenantId = getTenantId();
 
     if (this.isNew) {
@@ -213,6 +223,9 @@ export function tenantPlugin(schema) {
   // but we also hook at the static level to catch bulk operations and
   // ensure the filter passed to create/insertMany doesn't contain a different tenantId.
   schema.pre('create', function (next, docs) {
+    if (isUnscoped()) {
+      return next();
+    }
     const tenantId = getTenantId();
     const documents = Array.isArray(docs) ? docs : [docs];
     for (const doc of documents) {
@@ -228,6 +241,9 @@ export function tenantPlugin(schema) {
   });
 
   schema.pre('insertMany', function (next, docs) {
+    if (isUnscoped()) {
+      return next();
+    }
     const tenantId = getTenantId();
     const documents = Array.isArray(docs) ? docs : [docs];
     for (const doc of documents) {
@@ -248,6 +264,9 @@ export function tenantPlugin(schema) {
   const updateMethods = ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace'];
   for (const method of updateMethods) {
     schema.pre(method, function (next) {
+      if (isUnscoped()) {
+        return next();
+      }
       // For query middleware, update document is in this._update
       const update = this.getUpdate();
       assertNoTenantIdChange(update);
