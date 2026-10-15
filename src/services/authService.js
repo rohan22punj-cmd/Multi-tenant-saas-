@@ -367,7 +367,13 @@ export async function logout(refreshToken) {
   // If it's garbage or expired, we just do nothing — still return success.
   try {
     const decoded = verifyRefreshToken(refreshToken);
-    await User.findByIdAndUpdate(decoded.userId, { refreshTokenHash: null });
+    const { userId, tenantId } = decoded;
+
+    // Run inside tenant context using tenantId from the verified token
+    // Context is set manually here because there's no logged-in request.
+    await runWithTenant({ tenantId }, async () => {
+      await User.findByIdAndUpdate(userId, { refreshTokenHash: null });
+    });
   } catch {
     // Token is garbage or expired — nothing to clear, that's fine.
   }
