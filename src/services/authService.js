@@ -304,19 +304,28 @@ export async function refresh(refreshToken) {
     throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 2. Find the user
-  const user = await User.findById(decoded.userId);
+  // 2. Find the user and check tenant INSIDE tenant context
+  // Context is set manually here using tenantId from the verified token payload —
+  // there's no logged-in request yet (access token expired).
+  const { userId, tenantId } = decoded;
+
+  const user = await runWithTenant({ tenantId }, async () => {
+    return User.findById(userId);
+  });
   if (!user || !user.isActive) {
     throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 3. Check that the tenant still exists
-  const tenant = await Tenant.findById(user.tenantId);
+  // 3. Check that the tenant still exists (unscoped - Tenant model)
+  const tenant = await runUnscoped(
+    'refresh: verify tenant still exists',
+    () => Tenant.findById(tenantId)
+  );
   if (!tenant) {
     throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 4. Hash the incoming token and compare with stored hash
+  // 4. Hash the incoming token and compare with stored hash (inside tenant context)
   const incomingHash = hashToken(refreshToken);
 
   if (user.refreshTokenHash !== incomingHash) {
@@ -324,19 +333,25 @@ export async function refresh(refreshToken) {
     // Wipe the stored hash so even the newest token stops working.
     // This is the safety measure: if an attacker stole the old token,
     // nuking everything forces the real user to re-login (annoying but safe).
-    user.refreshTokenHash = null;
-    await user.save();
+    await runWithTenant({ tenantId }, async () => {
+      user.refreshTokenHash = null;
+      await user.save();
+    });
     throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 5. Fetch the role to get current permissions
-  const role = await Role.findById(user.roleId).lean();
+  // 5. Fetch the role to get current permissions (inside tenant context)
+  const role = await runWithTenant({ tenantId }, async () => {
+    return Role.findById(user.roleId).lean();
+  });
   if (!role) {
     throw new AppError(GENERIC_MSG, 401);
   }
 
-  // 6. Issue fresh tokens (this also replaces the stored hash)
-  const tokens = await issueAndStoreTokens(user, role.permissions);
+  // 6. Issue fresh tokens (this also replaces the stored hash) inside tenant context
+  const tokens = await runWithTenant({ tenantId }, async () => {
+    return issueAndStoreTokens(user, role.permissions);
+  });
 
   return tokens;
 }
