@@ -226,13 +226,21 @@ export async function signup({ companyName, adminName, email, password }) {
  * @returns {{ accessToken, refreshToken, user }}
  */
 export async function login({ companySlug, email, password }) {
-  // 1. Find the tenant
-  const tenant = await Tenant.findOne({ slug: companySlug });
+  // 1. Find the tenant (unscoped - Tenant model has no tenantId)
+  const tenant = await runUnscoped(
+    'login: find tenant by slug',
+    () => Tenant.findOne({ slug: companySlug })
+  );
 
-  // 2. Find the user within that tenant (if tenant exists)
+  // 2. Find the user within that tenant INSIDE tenant context
+  // Context is set manually here because there's no logged-in request yet —
+  // we just looked up the tenant by slug and know its ID.
   let user = null;
   if (tenant) {
-    user = await User.findOne({ tenantId: tenant._id, email });
+    user = await runWithTenant({ tenantId: tenant._id }, async () => {
+      // tenantId is auto-injected by tenantPlugin; we don't pass it
+      return User.findOne({ email });
+    });
   }
 
   // 3. Always run bcrypt.compare to prevent timing attacks.
@@ -246,14 +254,18 @@ export async function login({ companySlug, email, password }) {
     throw new AppError('Invalid credentials', 401);
   }
 
-  // 5. Fetch the role to get current permissions
-  const role = await Role.findById(user.roleId).lean();
+  // 5. Fetch the role to get current permissions (inside tenant context)
+  const role = await runWithTenant({ tenantId: tenant._id }, async () => {
+    return Role.findById(user.roleId).lean();
+  });
   if (!role) {
     throw new AppError('Invalid credentials', 401);
   }
 
-  // 6. Issue tokens and store refresh token hash
-  const tokens = await issueAndStoreTokens(user, role.permissions);
+  // 6. Issue tokens and store refresh token hash (inside tenant context)
+  const tokens = await runWithTenant({ tenantId: tenant._id }, async () => {
+    return issueAndStoreTokens(user, role.permissions);
+  });
 
   // 7. Return tokens + minimal user object (no password hash)
   return {
