@@ -17,18 +17,25 @@
  * On every refresh we replace the hash (rotation), and on
  * reuse of an old token we clear the hash entirely, killing
  * all sessions for that user as a safety measure.
+ *
+ * TENANT PLUGIN:
+ * The tenantPlugin is applied below. It automatically scopes every
+ * query (find, update, delete, aggregate, countDocuments, distinct)
+ * to the current tenant from AsyncLocalStorage. It also:
+ *   - Force-overwrites any tenantId in the caller's filter
+ *   - Throws if called outside a tenant context (no silent leaks)
+ *   - Blocks any attempt to change a document's tenantId
+ *   - Auto-stamps tenantId on new documents (save, create, insertMany)
+ *
+ * FUTURE MODELS: Every new tenant-owned model (Project, Task, etc.)
+ * MUST apply this plugin. Do not skip it.
  */
 
 import mongoose from 'mongoose';
+import tenantPlugin from '../plugins/tenantPlugin.js';
 
 const userSchema = new mongoose.Schema(
   {
-    tenantId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Tenant',
-      required: [true, 'tenantId is required'],
-      index: true,
-    },
     name: {
       type: String,
       required: [true, 'User name is required'],
@@ -63,9 +70,15 @@ const userSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// The tenantPlugin will add the tenantId field (ObjectId, ref Tenant, required, indexed)
+// if it doesn't already exist. We don't define it here to avoid duplication.
+
 // Compound unique index: same email can exist in different tenants,
 // but not twice inside the same tenant.
 userSchema.index({ tenantId: 1, email: 1 }, { unique: true });
+
+// Apply the tenant filter plugin — automatic scoping to current tenant
+userSchema.plugin(tenantPlugin);
 
 const User = mongoose.model('User', userSchema);
 export default User;
