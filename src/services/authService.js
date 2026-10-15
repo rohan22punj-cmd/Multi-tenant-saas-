@@ -52,6 +52,7 @@ import {
   verifyRefreshToken,
 } from '../utils/tokens.js';
 import AppError from '../utils/AppError.js';
+import { runWithTenant, runUnscoped } from '../utils/tenantContext.js';
 
 const BCRYPT_SALT_ROUNDS = 12;
 
@@ -152,13 +153,16 @@ async function issueAndStoreTokens(user, permissions) {
  * @returns {{ accessToken, refreshToken, tenant, user }}
  */
 export async function signup({ companyName, adminName, email, password }) {
-  // 1. Generate slug and check for duplicates
+  // 1. Generate slug and check for duplicates (unscoped - Tenant has no tenantId)
   const slug = slugify(companyName);
   if (!slug) {
     throw new AppError('Company name produces an empty slug', 400);
   }
 
-  const existingTenant = await Tenant.findOne({ slug });
+  const existingTenant = await runUnscoped(
+    'signup: check for duplicate tenant slug',
+    () => Tenant.findOne({ slug })
+  );
   if (existingTenant) {
     throw new AppError(
       `A company with the slug "${slug}" already exists. Choose a different name.`,
@@ -166,45 +170,50 @@ export async function signup({ companyName, adminName, email, password }) {
     );
   }
 
-  // 2. Create tenant
-  const tenant = await Tenant.create({ name: companyName, slug });
+  // 2. Create tenant (unscoped - Tenant model has no tenantId)
+  const tenant = await runUnscoped(
+    'signup: create new tenant',
+    () => Tenant.create({ name: companyName, slug })
+  );
 
-  // 3. Create default roles for this tenant
-  const [adminRole] = await Role.create([
-    {
-      tenantId: tenant._id,
-      name: 'admin',
-      permissions: ALL_PERMISSIONS,   // every permission
-      isSystemRole: true,
-    },
-    {
-      tenantId: tenant._id,
-      name: 'member',
-      permissions: MEMBER_PERMISSIONS,
-      isSystemRole: true,
-    },
-  ]);
+  // 3. Create default roles and first user INSIDE tenant context
+  // Context is set manually here because there's no logged-in request yet —
+  // we just created the tenant and know its ID.
+  return runWithTenant({ tenantId: tenant._id }, async () => {
+    const [adminRole] = await Role.create([
+      {
+        name: 'admin',
+        permissions: ALL_PERMISSIONS,   // every permission
+        isSystemRole: true,
+      },
+      {
+        name: 'member',
+        permissions: MEMBER_PERMISSIONS,
+        isSystemRole: true,
+      },
+    ]);
 
-  // 4. Hash password (NEVER store plain text)
-  const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+    // 4. Hash password (NEVER store plain text)
+    const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 
-  // 5. Create the first user with the admin role
-  const user = await User.create({
-    tenantId: tenant._id,
-    name: adminName,
-    email,
-    passwordHash,
-    roleId: adminRole._id,
+    // 5. Create the first user with the admin role
+    // tenantId is auto-stamped by the tenantPlugin from context
+    const user = await User.create({
+      name: adminName,
+      email,
+      passwordHash,
+      roleId: adminRole._id,
+    });
+
+    // 6. Issue tokens and store refresh token hash
+    const tokens = await issueAndStoreTokens(user, adminRole.permissions);
+
+    return {
+      ...tokens,
+      tenant: { id: tenant._id, name: tenant.name, slug: tenant.slug },
+      user: { id: user._id, name: user.name, email: user.email },
+    };
   });
-
-  // 6. Issue tokens and store refresh token hash
-  const tokens = await issueAndStoreTokens(user, adminRole.permissions);
-
-  return {
-    ...tokens,
-    tenant: { id: tenant._id, name: tenant.name, slug: tenant.slug },
-    user: { id: user._id, name: user.name, email: user.email },
-  };
 }
 
 /**
