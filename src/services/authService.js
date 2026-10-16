@@ -45,7 +45,7 @@ import bcrypt from 'bcryptjs';
 import Tenant from '../models/Tenant.js';
 import Role from '../models/Role.js';
 import User from '../models/User.js';
-import { ALL_PERMISSIONS } from '../models/permissions.js';
+import { ALL_PERMISSIONS, DEFAULT_ROLES } from '../models/permissions.js';
 import {
   signAccessToken,
   signRefreshToken,
@@ -60,16 +60,7 @@ const BCRYPT_SALT_ROUNDS = 12;
 // takes the same time as a real comparison, preventing user enumeration.
 const DUMMY_HASH = '$2a$12$dummyhashdummyhashdummyh';
 
-/**
- * The "member" role gets read-only access to projects and tasks
- * plus the ability to create and update tasks (a typical team member).
- */
-const MEMBER_PERMISSIONS = [
-  'project:read',
-  'task:create',
-  'task:read',
-  'task:update',
-];
+// Removed — member permissions now come from DEFAULT_ROLES in permissions.js.
 
 // ──────────────────────────────────────────────────────────────
 // Helpers
@@ -183,12 +174,12 @@ export async function signup({ companyName, adminName, email, password }) {
     const [adminRole] = await Role.create([
       {
         name: 'admin',
-        permissions: ALL_PERMISSIONS,   // every permission
+        permissions: DEFAULT_ROLES.admin,
         isSystemRole: true,
       },
       {
         name: 'member',
-        permissions: MEMBER_PERMISSIONS,
+        permissions: DEFAULT_ROLES.member,
         isSystemRole: true,
       },
     ]);

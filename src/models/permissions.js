@@ -33,4 +33,19 @@ const PERMISSIONS = Object.freeze({
 /** Flat array of all permission key strings, useful for validation. */
 export const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
+/**
+ * Default role → permission mappings used at signup.
+ * "admin" gets every permission; "member" gets basic read/task access.
+ * Custom roles can later hold any subset of ALL_PERMISSIONS.
+ */
+export const DEFAULT_ROLES = Object.freeze({
+  admin:  [...ALL_PERMISSIONS],
+  member: [
+    PERMISSIONS.PROJECT_READ,
+    PERMISSIONS.TASK_CREATE,
+    PERMISSIONS.TASK_READ,
+    PERMISSIONS.TASK_UPDATE,
+  ],
+});
+
 export default PERMISSIONS;
