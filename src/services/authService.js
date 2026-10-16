@@ -45,7 +45,7 @@ import bcrypt from 'bcryptjs';
 import Tenant from '../models/Tenant.js';
 import Role from '../models/Role.js';
 import User from '../models/User.js';
-import { ALL_PERMISSIONS, DEFAULT_ROLES } from '../models/permissions.js';
+import { ALL_PERMISSIONS, DEFAULT_ROLES } from '../constants/permissions.js';
 import {
   signAccessToken,
   signRefreshToken,

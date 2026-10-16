@@ -1,51 +1,10 @@
 /**
- * Fixed list of every permission key in the system.
- *
- * WHY a constant file instead of a database table:
- * Permissions are part of the CODE CONTRACT — they map 1-to-1 to
- * things the API can do. Keeping them in code means a developer
- * can grep for 'project:delete' and find every place it's checked.
- * Roles (which ARE in the database) hold arrays of these keys.
+ * Re-exports the canonical permission constant definitions from src/constants/permissions.js.
+ * Keeps the existing import path working for any code that already imports from this module.
  */
 
-const PERMISSIONS = Object.freeze({
-  // Projects
-  PROJECT_CREATE: 'project:create',
-  PROJECT_READ:   'project:read',
-  PROJECT_UPDATE: 'project:update',
-  PROJECT_DELETE: 'project:delete',
+import { PERMISSIONS, ALL_PERMISSIONS, DEFAULT_ROLES } from '../constants/permissions.js';
 
-  // Tasks
-  TASK_CREATE: 'task:create',
-  TASK_READ:   'task:read',
-  TASK_UPDATE: 'task:update',
-  TASK_DELETE: 'task:delete',
-
-  // User management
-  USER_INVITE: 'user:invite',
-  USER_MANAGE: 'user:manage',
-
-  // Billing
-  BILLING_VIEW:   'billing:view',
-  BILLING_MANAGE: 'billing:manage',
-});
-
-/** Flat array of all permission key strings, useful for validation. */
-export const ALL_PERMISSIONS = Object.values(PERMISSIONS);
-
-/**
- * Default role → permission mappings used at signup.
- * "admin" gets every permission; "member" gets basic read/task access.
- * Custom roles can later hold any subset of ALL_PERMISSIONS.
- */
-export const DEFAULT_ROLES = Object.freeze({
-  admin:  [...ALL_PERMISSIONS],
-  member: [
-    PERMISSIONS.PROJECT_READ,
-    PERMISSIONS.TASK_CREATE,
-    PERMISSIONS.TASK_READ,
-    PERMISSIONS.TASK_UPDATE,
-  ],
-});
+export { PERMISSIONS, ALL_PERMISSIONS, DEFAULT_ROLES };
 
 export default PERMISSIONS;

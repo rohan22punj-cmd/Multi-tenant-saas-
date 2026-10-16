@@ -27,6 +27,7 @@ import protect from './middleware/protect.js';
 import tenantContextMiddleware from './middleware/tenantContext.js';
 import { getTenantId } from './utils/tenantContext.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
+import rbacDemoRoutes from './routes/rbacDemo.routes.js';
 
 const app = express();
 
@@ -51,6 +52,9 @@ app.use('/api', generalLimiter);
 
 // ─── Auth routes (signup, login, refresh, logout) ───
 app.use('/api/auth', authRoutes);
+
+// ─── Demo RBAC routes (test-only, to delete later) ───
+app.use('/api/demo', rbacDemoRoutes);
 
 // ─── Protected test route ───
 // Demonstrates that protect + tenantContext work together.
