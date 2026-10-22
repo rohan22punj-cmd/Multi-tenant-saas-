@@ -1,4 +1,4 @@
-import { PERMISSIONS } from '../constants/permissions.js';
+import { ALL_PERMISSIONS } from '../constants/permissions.js';
 import AppError from '../utils/AppError.js';
 
 /**
@@ -8,7 +8,7 @@ import AppError from '../utils/AppError.js';
  */
 const validateKeys = (keys) => {
   for (const key of keys) {
-    if (!PERMISSIONS[key]) {
+    if (!ALL_PERMISSIONS.includes(key)) {
       throw new Error(`Unknown permission key: ${key}`);
     }
   }
