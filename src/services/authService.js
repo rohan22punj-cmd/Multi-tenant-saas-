@@ -118,7 +118,7 @@ function buildRefreshPayload(user) {
  * Signs both tokens, stores the refresh token hash on the user,
  * and returns the raw tokens.
  */
-async function issueAndStoreTokens(user, permissions) {
+export async function issueAndStoreTokens(user, permissions) {
   const accessToken = signAccessToken(buildAccessPayload(user, permissions));
   const refreshToken = signRefreshToken(buildRefreshPayload(user));
 
