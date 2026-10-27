@@ -199,7 +199,13 @@ export function tenantPlugin(schema) {
     if (isUnscoped()) {
       return next();
     }
-    const tenantId = getTenantId();
+    let tenantId;
+    try {
+      tenantId = getTenantId();
+    } catch (err) {
+      console.error('[tenantPlugin pre-save] getTenantId failed:', err.message);
+      return next(err);
+    }
 
     if (this.isNew) {
       // New document — stamp tenantId
