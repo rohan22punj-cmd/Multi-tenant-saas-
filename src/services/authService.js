@@ -176,11 +176,13 @@ export async function signup({ companyName, adminName, email, password }) {
         name: 'admin',
         permissions: DEFAULT_ROLES.admin,
         isSystemRole: true,
+        tenantId: tenant._id,
       },
       {
         name: 'member',
         permissions: DEFAULT_ROLES.member,
         isSystemRole: true,
+        tenantId: tenant._id,
       },
     ]);
 
