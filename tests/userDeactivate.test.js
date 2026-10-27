@@ -323,7 +323,7 @@ describe('PATCH /api/users/:id/deactivate and /reactivate', () => {
 
     const rawToken = new URL(inviteRes.body.inviteLink).searchParams.get('token');
     const acceptRes = await request(app)
-      .post('/api/auth/accept-invite')
+      .post('/api/auth/auth/accept-invite')
       .send({ companySlug: tenantSlug, token: rawToken, name: 'Admin Eta 2', password: 'SecureP@ss123' });
     expect(acceptRes.status).toBe(200);
     const admin2Id = acceptRes.body.data.user.id;
