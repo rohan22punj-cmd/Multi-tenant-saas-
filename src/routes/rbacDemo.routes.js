@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { requirePermission } from '../middleware/requirePermission.js';
 import protect from '../middleware/protect.js';
+import Role from '../models/Role.js';
+import asyncHandler from '../utils/asyncHandler.js';
 
 const router = Router();
 
@@ -37,6 +39,18 @@ router.get(
   (_req, res) => {
     res.status(200).json({ message: 'Billing viewed' });
   }
+);
+
+// GET /api/demo/roles – lists roles in the caller's tenant (needs user:manage)
+// Used by tests to resolve role ids without a dedicated roles API.
+router.get(
+  '/roles',
+  protect,
+  requirePermission('user:manage'),
+  asyncHandler(async (_req, res) => {
+    const roles = await Role.find({}).lean();
+    res.status(200).json({ data: roles });
+  })
 );
 
 export default router;
