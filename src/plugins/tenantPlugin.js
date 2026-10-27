@@ -225,44 +225,8 @@ export function tenantPlugin(schema) {
     next();
   });
 
-  // create() and insertMany() go through save() internally for each doc,
-  // but we also hook at the static level to catch bulk operations and
-  // ensure the filter passed to create/insertMany doesn't contain a different tenantId.
-  schema.pre('create', function (next, docs) {
-    if (isUnscoped()) {
-      return next();
-    }
-    const tenantId = getTenantId();
-    const documents = Array.isArray(docs) ? docs : [docs];
-    for (const doc of documents) {
-      if (doc && doc.tenantId && !doc.tenantId.equals(tenantId)) {
-        return next(new Error(
-          `Document tenantId (${doc.tenantId}) does not match current context (${tenantId}). ` +
-          'Cannot create a document for a different tenant.'
-        ));
-      }
-      if (doc) doc.tenantId = tenantId;
-    }
-    next();
-  });
-
-  schema.pre('insertMany', function (next, docs) {
-    if (isUnscoped()) {
-      return next();
-    }
-    const tenantId = getTenantId();
-    const documents = Array.isArray(docs) ? docs : [docs];
-    for (const doc of documents) {
-      if (doc && doc.tenantId && !doc.tenantId.equals(tenantId)) {
-        return next(new Error(
-          `Document tenantId (${doc.tenantId}) does not match current context (${tenantId}). ` +
-          'Cannot create a document for a different tenant.'
-        ));
-      }
-      if (doc) doc.tenantId = tenantId;
-    }
-    next();
-  });
+  // create() goes through save() internally for each doc, so the pre('save') hook handles it.
+  // insertMany() requires explicit tenantId in the documents passed to it.
 
   // ──────────────────────────────────────────────────────────────
   // f) Block tenantId changes on updates — pre hooks for update methods
