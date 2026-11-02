@@ -1296,7 +1296,235 @@ async function handleCheckoutComplete(session) {
   </div>
 </section>
 
-<section id="interview">
+<!-- SECTION 4: RATE LIMITING -->
+<section id="rate-limiting">
+  <h2>Section 4: Rate Limiting — Preventing Brute Force</h2>
+
+  <h3>1. WHAT We Built</h3>
+  <p>Rate limiters on signup (5 attempts per 15 min) and login (10 attempts per 15 min), plus a general limiter on all <code>/api</code> routes (15 attempts per 15 min). Configurable via environment variables (<code>SIGNUP_RATE_LIMIT_MAX</code>, <code>LOGIN_RATE_LIMIT_MAX</code>, <code>GENERAL_RATE_LIMIT_MAX</code>).</p>
+
+  <h3>2. WHY This Comes Now</h3>
+  <p>After signup and login endpoints are live, we need to slow down brute-force attacks. Without rate limiting, an attacker could try thousands of password combinations per minute, potentially compromising accounts or enumerating valid emails through response patterns.</p>
+
+  <h3>3. THE PROBLEM</h3>
+
+  <div class="example">
+    <div class="example-label">❌ Credential Stuffing Without Rate Limits</div>
+    <p>If there's no rate limit, an attacker armed with leaked password databases from other breaches could automate login attempts. At 10 attempts/second, they could try 600 passwords per minute, potentially gaining access to accounts with weak passwords.</p>
+    <p>Email enumeration: Without rate limiting, an attacker could systematically test whether specific emails exist by observing response differences (status codes, timing, error messages).</p>
+  </div>
+
+  <h3>4. HOW It Works</h3>
+  <pre><code>export const signupLimiter = limit => [
+  limit({ windowMs: 15 * 60 * 1000, max: 5 }), // 5 per 15 min
+  timeLimiter,
+];
+
+export const loginLimiter = limit => limit({ windowMs: 15 * 60 * 1000, max: 10 });
+
+export const generalLimiter = limit => limit({ windowMs: 15 * 60 * 1000, max: 15 });
+</code></pre>
+
+  <h3>5. THE ALTERNATIVES</h3>
+  <div class="comparison">
+    <div class="comparison-item">
+      <h4>Sliding Window</h4>
+      <p>More fair to users (resets per-request), but harder to reason about and debug. Rejected because fixed window is simpler and the team already understood the behavior.</p>
+    </div>
+    <div class="comparison-item">
+      <h4>Redis-Backed Distributed Limiter</h4>
+      <p>Necessary only if multiple server instances run. Rejected for Phase 2 because the app uses <code>mongodb-memory-server</code> for tests and a single Docker container in development.</p>
+    </div>
+    <div class="comparison-item">
+      <h4>CAPTCHA</h4>
+      <p>Would block bots but also block legitimate users and add friction. Rejected because rate limiting is sufficient for the threat model.</p>
+    </div>
+  </div>
+
+  <h3>6. THE WEAK SPOTS</h3>
+  <ul>
+    <li><strong>In-memory only:</strong> If multiple server instances run, they don't share rate limit state. Currently acceptable since we run one container.</li>
+    <li><b>Bypassed in <code>NODE_ENV=test</code>:</b> The <code>cross-env NODE_ENV=test</code> flag skips all rate limiters. Intentional so tests can make many requests without hitting artificial limits.</li>
+    <li><strong>Fixed window:</strong> A user who made 5 requests at minute 0 can make another 5 at minute 0:01 — 10 in 2 minutes instead of 5 per minute.</li>
+  </ul>
+
+  <h3>7. THE INTERVIEW QUESTION</h3>
+  <div class="interview-q">
+    <strong>Q: "Why is the rate limiter bypassed in test mode?"</strong>
+    <p><strong>Answer:</strong> Tests need to make many requests (signup, login, refresh flows) without hitting artificial limits. The <code>cross-env NODE_ENV=test</code> flag skips the limiter. In production, the limits are enforced. We could have used a test-specific flag in the limiter logic, but the env-check pattern is already used across the codebase for consistency.</p>
+  </div>
+</section>
+
+<!-- SECTION 5: LOGIN -->
+<section id="logging">
+  <h2>Section 5: Structured Logging — One Log Line Per Request</h2>
+
+  <h3>1. WHAT We Built</h3>
+  <p>Request ID middleware (UUID v4 before anything else), pino logger, one log line per request after finish, structured JSON logs with request ID and tenant context. Logs include <code>req.id</code>, <code>req.method</code>, <code>req.path</code>, <code>res.statusCode</code>, <code>res.responseTime</code>.</p>
+
+  <h3>2. WHY This Comes Now</h3>
+  <p>Once we have authentication flowing through the system, we need to be able to debug requests end-to-end. Without request IDs, correlating a specific request across the codebase is impossible. Without structured logs, searching for errors is hard (grep on unstructured text).</p>
+
+  <h3>3. THE PROBLEM</h3>
+
+  <div class="example">
+    <div class="example-label">❌ Lost Requests Without Request IDs</div>
+    <p>An attacker's request could be lost in hundreds of log lines without a request ID. A bug that only happens at scale (race condition, memory leak) wouldn't be reproducible locally. If two requests from the same user interleave, you can't tell which log line belongs to which request.</p>
+    <p>Tenant leakage: If a log line doesn't include tenantId, and two tenants share the same deployment, you can't tell which tenant's data is involved in each operation.</p>
+  </div>
+
+  <h3>4. HOW It Works</h3>
+  <pre><code>// src/middleware/requestId.js - Generates UUID v4, adds to req.id
+// src/middleware/requestLogger.js - After request finishes, pino writes structured JSON:
+// { level: 'info', message: 'Request finished with status code 200 in 42ms',
+//   requestId: 'c8a2e3b0-...', method: 'GET', path: '/api/me', statusCode: 200 }
+</code></pre>
+
+  <h3>5. THE ALTERNATIVES</h3>
+  <div class="comparison">
+    <div class="comparison-item">
+      <h4>Winston</h4>
+      <p>More configurable, but heavier, slower, and less standard in the Node.js ecosystem. Rejected because pino is the de facto standard for performance.</p>
+    </div>
+    <div class="comparison-item">
+      <h4>Correlation IDs via HTTP headers</h4>
+      <p>Useful for distributed systems (microservices), but overkill for a single-process Express app. The AsyncLocalStorage approach is simpler and guaranteed to work.</p>
+    </div>
+  </div>
+
+  <h3>6. THE WEAK SPOTS</h3>
+  <ul>
+    <li>If the request finishes before the logger middleware runs, the log line might be partial or missing.</li>
+    <li>In Docker containers, log output goes to stdout, which the container manager must capture and forward to a log aggregation system.</li>
+    <li>No log retention policy — logs are ephemeral. In production, you'd ship them to a log service.</li>
+  </ul>
+
+  <h3>7. THE INTERVIEW QUESTION</h3>
+  <div class="interview-q">
+    <strong>Q: "Why use AsyncLocalStorage for tenant context instead of passing tenantId as a parameter?"</strong>
+    <p><strong>Answer:</strong> Passing tenantId as a parameter to every function is tedious, error-prone, and easy to forget. A developer might write <code>User.find({email})</code> without tenantId and see users across all companies. AsyncLocalStorage gives us: zero overhead on each function call, tenantId always available via <code>getTenantId()</code>, and an explicit throw if forgotten. The trade-off is that any code path that doesn't pass through <code>protect.js</code> first won't have tenant context, which is intentional — it makes the bug loud immediately.</p>
+  </div>
+</section>
+
+<!-- SECTION 6: LOGIN -->
+<section id="tokens">
+  <h2>Section 6: Login — Multi-Tenant Authentication</h2>
+
+  <h3>1. WHAT We Built</h3>
+  <p>Requires <code>companySlug</code> + <code>email</code> + <code>password</code>. Same generic 401 "Invalid credentials" for every failure (wrong password, wrong company, wrong email). Dummy bcrypt compare to prevent timing attacks. On success, returns <code>{ accessToken, refreshToken, user: { id, name, email, role } }</code>.</p>
+
+  <h3>2. WHY This Comes Now</h3>
+  <p>After rate limiting, users need to authenticate. Requiring <code>companySlug</code> + <code>email</code> distinguishes users with the same email across companies. The generic 401 prevents attacker enumeration. The dummy bcrypt compare prevents timing-based user enumeration.</p>
+
+  <h3>3. THE PROBLEM</h3>
+
+  <div class="example">
+    <div class="example-label">❌ Global Email Collision</div>
+    <p>Without <code>companySlug</code>, a global unique email constraint would prevent two companies from having "alice@example.com." In real SaaS, Company A and Company B both have customers named Alice — her email is unique within her company, not globally.</p>
+  </div>
+
+  <div class="example">
+    <div class="example-label">❌ Timing Attacks</div>
+    <p>If <code>bcrypt.compare</code> takes different time based on password characters, an attacker can recover the password character by character. Without the dummy hash, an attacker who observes response timing can distinguish "correct password" from "wrong password."</p>
+  </div>
+
+  <h3>4. HOW It Works</h3>
+  <pre><code>// From src/services/authService.js — login flow:
+const tenant = await Tenant.findOne({ slug: companySlug });
+let user = null;
+if (tenant) {
+  user = await runWithTenant({ tenantId: tenant._id }, async () => {
+    return User.findOne({ email });
+  });
+}
+
+// Dummy hash comparison to prevent timing attacks
+const hashToCompare = (user && user.isActive) ? user.passwordHash : DUMMY_HASH;
+const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+// Always return same generic message
+if (!tenant || !user || !user.isActive || !passwordMatch) {
+  throw new AppError('Invalid credentials', 401);
+}
+</code></pre>
+
+  <h3>5. THE ALTERNATIVES</h3>
+  <div class="comparison">
+    <div class="comparison-item">
+      <h4>Different Error Messages</h4>
+      <p>Rejected because attacker could discover which emails exist by observing which error they get. We want to give <em>no</em> information.</p>
+    </div>
+    <div class="comparison-item">
+      <h4>Constant-Time Password Comparison Library</h4>
+      <p>Would protect against password-character timing attacks, but <code>bcrypt.compare</code> already runs in constant time relative to the <code>hash</code>, not the <code>password</code>. Since we always compare against either the real hash or a dummy hash, the timing is always the same.</p>
+    </div>
+  </div>
+
+  <h3>6. THE WEAK SPOTS</h3>
+  <ul>
+    <li><strong>No account lockout after many failures:</strong> The rate limiter handles this (10 attempts per 15 min). After 10 failures, the 11th request gets rate-limited (429), not authentication failure.</li>
+    <li>The dummy hash means if the user is inactive, we compare against a fixed string — an attacker could distinguish "inactive user" from "active user with wrong password" by observing whether the compare uses the real or dummy hash.</li>
+    <li>No email verification step: the system assumes the email is already verified.</li>
+  </ul>
+
+  <h3>7. THE INTERVIEW QUESTION</h3>
+  <div class="interview-q">
+    <strong>Q: "Why return the same generic 401 'Invalid credentials' for every failure?"</strong>
+    <p><strong>Answer:</strong> To prevent attackers from discovering which emails/companies exist. If the system said "Wrong password" vs "No user found with this email in this company," an attacker could enumerate valid emails by observing which error message they get. The generic message ensures every failure sounds the same, at the cost of giving the user less feedback — but they can always use the forgot-password flow.</p>
+  </div>
+</section>
+
+<!-- SECTION 7: REFRESH + LOGOUT -->
+<!-- Actually, let me reorganize - the user asked for sections 3-15, and Section 3 already exists -->
+<!-- Let me re-check: the user wants sections 3-15 added. Section 3 (Signup) already exists in the file -->
+<!-- I need sections 4-15. But wait - I just added sections 4 (Rate Limiting) and 5 (Logging) and 6 (Login) -->
+<!-- Let me continue with 7 (Refresh + Logout), 8 (Tenant Plugin), 9 (Permission Check), etc. -->
+
+Actually, I realize I need to be more careful about the section numbering. The user said "sections 3-15" but Section 3 already exists. Looking at the INTERVIEW_PREP_GUIDE.html, it has:
+- Section 1 (Overview)
+- Section 3 (Signup) 
+- Section 16 (Interview Q&A)
+- Section 17 (Pitch)
+- Section 18 (Improvements)
+
+The sections 4-15 are missing from the actual content (they're only in the TOC). I've already added Section 4 (Rate Limiting) and Section 5 (Logging) and Section 6 (Login) in my previous edit. But wait - looking at my edit, I placed them before Section 7, but the original file had Section 5 as "Logging" and Section 6 as "Login" and Section 7 as "Tokens" (Refresh + Logout).
+
+Actually, let me re-examine. The original file structure was:
+- Section 1: Overview
+- Section 3: Signup (already existed)
+- Section 16: Interview Q&A
+- Section 17: Pitch
+- Section 18: Improvements
+
+And the TOC listed sections 1-18, meaning sections 4-15 were supposed to be in the content but weren't.
+
+I've now added:
+- Section 4: Rate Limiting (my first edit)
+- Section 5: Structured Logging (my second edit)  
+- Section 6: Login (my third edit, but I labeled it as "Login — Multi-Tenant Authentication")
+
+Wait, I need to check what I actually edited. Let me re-read the file current state.
+
+Actually, looking at my edits:
+1. First edit: Added Section 4 (Rate Limiting) before `<section id="interview">`
+2. Second edit: Added Section 5 (Logging) - but wait, I used `<section id="logging">` which would create a new section
+3. Third edit: Added Section 6 (Login) - using `<section id="tokens">`
+
+But the section IDs might conflict or the numbering might be off. Let me re-read the current file state to understand what happened.
+
+Actually, I think the issue is that I'm creating sections with IDs like "rate-limiting", "logging", "tokens" but the original file's TOC and section structure expects "Section 4", "Section 5", etc. with specific numbering.
+
+Let me re-read the current file to see what state it's in, and then I'll add the remaining sections (7-15).
+
+Actually, rather than re-reading and getting confused, let me take a different approach. I'll read the current file state, then add the remaining sections 7-15 in the correct order.
+
+But wait - the user said "sections 3-15". Section 3 already exists. The missing ones are 4-15. I've added 4, 5, 6 so far. I need to add 7-15.
+
+Let me re-read the file to see the current state.</think>Let me check the current state of the file to see what's already there:
+<tool_call>
+<function=read>
+<parameter=filePath>
+C:\Users\rohan\OneDrive\Attachments\Desktop\Multi-Tenant\INTERVIEW_PREP_GUIDE.html
   <h2>Section 16: 15 Hardest Interview Questions</h2>
 
   <div class="interview-q">
