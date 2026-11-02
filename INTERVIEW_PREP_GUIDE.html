@@ -679,6 +679,623 @@ await runUnscoped('reason', () => Tenant.findOne({ slug }))</code></pre>
   </div>
 </section>
 
+<section id="foundation">
+  <h2>Section 2: Foundation — Error Handling</h2>
+
+  <h3>The Problem</h3>
+  <p>Without centralized error handling, every route duplicates try/catch blocks, errors leak stack traces to clients, and 500s mix with validation failures.</p>
+
+  <h3>The Solution</h3>
+  <pre><code>// Custom error class
+class AppError extends Error {
+  constructor(message, statusCode = 500) {
+    super(message);
+    this.statusCode = statusCode;
+    this.isOperational = true;
+  }
+}
+
+// Global error handler middleware
+app.use((err, req, res, next) => {
+  const statusCode = err.statusCode || 500;
+  const message = err.isOperational ? err.message : 'Internal server error';
+
+  logger.error({ err, req }, message);
+
+  res.status(statusCode).json({
+    error: message,
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
+});</code></pre>
+
+  <div class="callout">
+    <h4>Key Principle</h4>
+    <p>Operational errors (bad user input, missing resources) get user-friendly messages. Programming errors (null reference, type errors) get generic "Internal server error" and detailed logs.</p>
+  </div>
+</section>
+
+<section id="rate-limiting">
+  <h2>Section 4: Rate Limiting</h2>
+
+  <h3>Why It Matters</h3>
+  <p>Without rate limiting, attackers can brute-force passwords, spam signups, or DDoS the API.</p>
+
+  <h3>Implementation</h3>
+  <pre><code>import rateLimit from 'express-rate-limit';
+
+// Global rate limit: 100 requests per 15 minutes per IP
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: 'Too many requests, please try again later'
+});
+
+// Strict rate limit for auth endpoints: 5 attempts per 15 minutes
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  skipSuccessfulRequests: true
+});
+
+app.use('/api/', globalLimiter);
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/signup', authLimiter);</code></pre>
+
+  <h3>What I'd Improve</h3>
+  <ul>
+    <li><strong>Per-tenant rate limiting:</strong> Currently limits by IP. One tenant shouldn't be able to exhaust API quota for others.</li>
+    <li><strong>Redis-backed store:</strong> In-memory store doesn't work across multiple server instances.</li>
+  </ul>
+</section>
+
+<section id="logging">
+  <h2>Section 5: Structured Logging</h2>
+
+  <h3>The Problem</h3>
+  <p>console.log is unstructured, hard to search, and doesn't correlate requests across microservices.</p>
+
+  <h3>The Solution: Pino</h3>
+  <pre><code>import pino from 'pino';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: process.env.NODE_ENV === 'development' ? {
+    target: 'pino-pretty',
+    options: { colorize: true }
+  } : undefined
+});
+
+// Request logging middleware
+app.use((req, res, next) => {
+  req.id = crypto.randomUUID();
+  req.log = logger.child({ requestId: req.id });
+
+  req.log.info({ method: req.method, url: req.url }, 'incoming request');
+  next();
+});</code></pre>
+
+  <h3>What Gets Logged</h3>
+  <ul>
+    <li><strong>Request ID:</strong> Traces a request through all logs</li>
+    <li><strong>Tenant ID & User ID:</strong> Who made the request</li>
+    <li><strong>Errors:</strong> Full stack traces in structured JSON</li>
+    <li><strong>Performance:</strong> Response times, slow queries</li>
+  </ul>
+</section>
+
+<section id="login">
+  <h2>Section 6: Login — Multi-Tenant Authentication</h2>
+
+  <h3>The Problem</h3>
+  <p>Users exist in multiple tenants with same email (admin@acme.com and admin@bigcorp.com could be the same person). Login needs to identify BOTH the user AND the tenant.</p>
+
+  <h3>POST /api/auth/login</h3>
+  <pre><code>export async function login({ companySlug, email, password }) {
+  // 1. Find tenant by slug (UNSCOPED)
+  const tenant = await runUnscoped(
+    'login: find tenant',
+    () => Tenant.findOne({ slug: companySlug })
+  );
+  if (!tenant) throw new AppError('Invalid credentials', 401);
+
+  // 2. Find user in that tenant (SCOPED)
+  const user = await runWithTenant({ tenantId: tenant._id }, async () => {
+    const user = await User.findOne({ email }).populate('roleId');
+    if (!user) {
+      // Timing attack prevention: run bcrypt even when user doesn't exist
+      await bcrypt.compare(password, DUMMY_HASH);
+      throw new AppError('Invalid credentials', 401);
+    }
+
+    if (!user.isActive) throw new AppError('Account deactivated', 403);
+
+    // 3. Verify password
+    const valid = await bcrypt.compare(password, user.passwordHash);
+    if (!valid) throw new AppError('Invalid credentials', 401);
+
+    // 4. Issue tokens with permissions from role
+    return issueAndStoreTokens(user, user.roleId.permissions);
+  });
+
+  return user;
+}</code></pre>
+
+  <div class="callout">
+    <h4>Security: Timing Attack Prevention</h4>
+    <p>We ALWAYS run bcrypt.compare, even when user doesn't exist. This prevents attackers from discovering valid emails by measuring response time.</p>
+  </div>
+</section>
+
+<section id="tokens">
+  <h2>Section 7: Refresh & Logout — Token Rotation</h2>
+
+  <h3>Token Strategy</h3>
+  <ul>
+    <li><strong>Access Token:</strong> 15 minutes, stateless JWT, contains userId + tenantId + permissions</li>
+    <li><strong>Refresh Token:</strong> 7 days, SHA-256 hash stored in DB, one-time use with rotation</li>
+  </ul>
+
+  <h3>POST /api/auth/refresh</h3>
+  <pre><code>export async function refreshTokens({ refreshToken }) {
+  // 1. Hash incoming token
+  const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+  // 2. Find user with matching hash (UNSCOPED — searches all tenants)
+  const user = await runUnscoped(
+    'refresh: find user by token hash',
+    () => User.findOne({ refreshTokenHash: tokenHash }).populate('roleId')
+  );
+
+  if (!user) throw new AppError('Invalid refresh token', 401);
+
+  // 3. Reuse detection: if hash doesn't match, someone replayed old token
+  if (user.refreshTokenHash !== tokenHash) {
+    await user.updateOne({ refreshTokenHash: null });
+    throw new AppError('Token reuse detected - all sessions revoked', 401);
+  }
+
+  // 4. Issue new tokens and rotate hash
+  return runWithTenant({ tenantId: user.tenantId }, async () => {
+    return issueAndStoreTokens(user, user.roleId.permissions);
+  });
+}</code></pre>
+
+  <h3>POST /api/auth/logout</h3>
+  <pre><code>export async function logout(userId) {
+  await User.findByIdAndUpdate(userId, { refreshTokenHash: null });
+}</code></pre>
+
+  <div class="callout">
+    <h4>Reuse Detection</h4>
+    <p>If someone tries to use an already-rotated refresh token, we immediately wipe the stored hash. This kills ALL sessions for that user, forcing re-authentication. It's a security tripwire that catches token theft.</p>
+  </div>
+</section>
+
+<section id="tenant-context">
+  <h2>Section 8: Tenant Context — AsyncLocalStorage</h2>
+
+  <h3>The Problem</h3>
+  <p>Passing tenantId as a parameter through every function is error-prone. Forgetting it once = data leak across companies.</p>
+
+  <h3>The Solution: AsyncLocalStorage</h3>
+  <pre><code>import { AsyncLocalStorage } from 'node:async_hooks';
+
+const tenantContext = new AsyncLocalStorage();
+
+export function runWithTenant(context, callback) {
+  return tenantContext.run(context, callback);
+}
+
+export function getTenantId() {
+  const ctx = tenantContext.getStore();
+  if (!ctx?.tenantId) {
+    throw new Error('No tenant context - use runWithTenant or runUnscoped');
+  }
+  return ctx.tenantId;
+}
+
+export function runUnscoped(reason, callback) {
+  console.log('[UNSCOPED]', reason);
+  return callback();
+}</code></pre>
+
+  <h3>How protect.js Uses It</h3>
+  <pre><code>export function protect(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  const payload = jwt.verify(token, ACCESS_SECRET);
+
+  req.user = payload;
+
+  // Wrap the rest of the request in tenant context
+  runWithTenant(
+    { tenantId: payload.tenantId, userId: payload.userId },
+    () => next()
+  );
+}</code></pre>
+
+  <div class="callout">
+    <h4>Key Insight</h4>
+    <p>AsyncLocalStorage propagates context through ALL async operations (promises, callbacks, setTimeout) without explicit parameter passing. The Mongoose plugin calls getTenantId() and it just works.</p>
+  </div>
+</section>
+
+<section id="tenant-plugin">
+  <h2>Section 9: The Tenant Plugin — Automatic Isolation</h2>
+
+  <h3>The Core Mechanism</h3>
+  <pre><code>export function tenantPlugin(schema) {
+  // Add tenantId field to schema
+  schema.add({
+    tenantId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Tenant',
+      required: true,
+      immutable: true,
+      index: true
+    }
+  });
+
+  // Force tenantId on EVERY query
+  const methods = [
+    'find', 'findOne', 'findById',
+    'updateOne', 'updateMany',
+    'deleteOne', 'deleteMany',
+    'countDocuments'
+  ];
+
+  methods.forEach(method => {
+    schema.pre(method, function() {
+      const tenantId = getTenantId();
+      this.setQuery({ ...this.getQuery(), tenantId });
+    });
+  });
+
+  // Handle aggregation pipelines
+  schema.pre('aggregate', function() {
+    const tenantId = getTenantId();
+    this.pipeline().unshift({ $match: { tenantId } });
+  });
+
+  // Auto-stamp tenantId on create
+  schema.pre('save', function() {
+    if (!this.tenantId) {
+      this.tenantId = getTenantId();
+    }
+  });
+}
+
+// Apply to all multi-tenant models
+UserSchema.plugin(tenantPlugin);
+RoleSchema.plugin(tenantPlugin);
+ProjectSchema.plugin(tenantPlugin);</code></pre>
+
+  <h3>Why This Works</h3>
+  <ul>
+    <li><strong>Centralized:</strong> Isolation lives in ONE place, not scattered across controllers</li>
+    <li><strong>Automatic:</strong> Controllers write clean code, plugin handles filtering</li>
+    <li><strong>Safe:</strong> Impossible to forget — getTenantId() throws if context is missing</li>
+    <li><strong>Auditable:</strong> runUnscoped logs every bypass with reason</li>
+  </ul>
+
+  <div class="interview-q">
+    <strong>Q: "What if a developer uses the raw MongoDB driver?"</strong>
+    <p><strong>Answer:</strong> mongoose.connection.collection().find() bypasses the plugin completely — catastrophic data leak. Defense: (1) Code review, (2) ESLint rule banning raw driver usage, (3) Principle of least privilege — developers never need it. Only migrations use raw driver, and they run outside request context. No runtime defense against intentional bypass — that's why code review and tooling are critical.</p>
+  </div>
+</section>
+
+<section id="rbac">
+  <h2>Section 10: RBAC — Roles & Permissions</h2>
+
+  <h3>The Model</h3>
+  <pre><code>const RoleSchema = new Schema({
+  name: { type: String, required: true },
+  permissions: [{ type: String }],
+  isSystemRole: { type: Boolean, default: false }
+});
+
+const UserSchema = new Schema({
+  email: { type: String, required: true },
+  passwordHash: { type: String, required: true },
+  roleId: { type: Schema.Types.ObjectId, ref: 'Role', required: true },
+  isActive: { type: Boolean, default: true }
+});</code></pre>
+
+  <h3>Permission Checking</h3>
+  <pre><code>export function requirePermission(permission) {
+  return (req, res, next) => {
+    if (!req.user.permissions.includes(permission)) {
+      throw new AppError('Insufficient permissions', 403);
+    }
+    next();
+  };
+}
+
+// Usage
+router.delete('/projects/:id',
+  protect,
+  requirePermission('project:delete'),
+  deleteProject
+);</code></pre>
+
+  <h3>Critical Rule: Check Permissions, Not Role Names</h3>
+  <pre><code>// ❌ WRONG — breaks with custom roles
+if (req.user.role === 'admin') { ... }
+
+// ✅ CORRECT — works with any role that has the permission
+if (req.user.permissions.includes('project:delete')) { ... }</code></pre>
+
+  <h3>Permission Format</h3>
+  <ul>
+    <li><code>resource:action</code> pattern: <code>project:read</code>, <code>user:invite</code></li>
+    <li>Stored in JWT payload for fast checking (no DB hit per request)</li>
+    <li>Refreshed on login / token refresh</li>
+  </ul>
+</section>
+
+<section id="invite">
+  <h2>Section 11: Invite System</h2>
+
+  <h3>POST /api/users/invite</h3>
+  <pre><code>export async function inviteUser({ email, roleId }, inviterUserId) {
+  // 1. Fetch target role
+  const targetRole = await Role.findById(roleId);
+  if (!targetRole) throw new AppError('Role not found', 404);
+
+  // 2. Get inviter's permissions from JWT (req.user.permissions)
+  const inviter = await User.findById(inviterUserId).populate('roleId');
+  const inviterPermissions = inviter.roleId.permissions;
+
+  // 3. Privilege escalation check
+  const hasEscalation = targetRole.permissions.some(
+    perm => !inviterPermissions.includes(perm)
+  );
+
+  if (hasEscalation) {
+    throw new AppError(
+      'Cannot invite user with permissions you don\'t have',
+      403
+    );
+  }
+
+  // 4. Create user
+  const tempPassword = crypto.randomBytes(16).toString('hex');
+  const passwordHash = await bcrypt.hash(tempPassword, 12);
+
+  const newUser = await User.create({
+    email,
+    passwordHash,
+    roleId,
+    mustResetPassword: true
+  });
+
+  // 5. Send invitation email with temp password
+  await sendInviteEmail(email, tempPassword);
+
+  return newUser;
+}</code></pre>
+
+  <div class="callout">
+    <h4>Security: Privilege Escalation Prevention</h4>
+    <p>A user with <code>['project:read']</code> cannot invite someone with <code>['project:delete']</code>. You can only assign roles with permissions you yourself possess.</p>
+  </div>
+</section>
+
+<section id="deactivate">
+  <h2>Section 12: User Deactivation</h2>
+
+  <h3>PATCH /api/users/:id/deactivate</h3>
+  <pre><code>export async function deactivateUser(userId) {
+  const user = await User.findById(userId);
+  if (!user) throw new AppError('User not found', 404);
+
+  // Mark inactive and wipe refresh token
+  await user.updateOne({
+    isActive: false,
+    refreshTokenHash: null
+  });
+
+  // Current access token remains valid for up to 15 minutes
+  // Future refreshes fail immediately (no refresh token)
+}</code></pre>
+
+  <h3>The Trade-off</h3>
+  <ul>
+    <li><strong>Deactivated user keeps access for ~15 min</strong> (until access token expires)</li>
+    <li><strong>Can't get NEW tokens</strong> (refresh token wiped)</li>
+    <li><strong>For instant revocation:</strong> Add Redis blocklist (high-security contexts)</li>
+  </ul>
+</section>
+
+<section id="isolation-deep-dive">
+  <h2>Section 13: Multi-Tenancy Strategies Deep Dive</h2>
+
+  <h3>Three Approaches Compared</h3>
+
+  <h4>1. Database Per Tenant</h4>
+  <p><strong>How:</strong> Each company gets its own MongoDB database.</p>
+  <p><strong>Pros:</strong></p>
+  <ul>
+    <li>Perfect isolation (physical separation)</li>
+    <li>Easy to backup one tenant's data</li>
+    <li>Regulatory compliance (HIPAA, SOC2)</li>
+  </ul>
+  <p><strong>Cons:</strong></p>
+  <ul>
+    <li>High cost ($15/month × 1000 tenants = $15k/month)</li>
+    <li>Complex database routing</li>
+    <li>Running 1000 migrations is slow</li>
+  </ul>
+  <p><strong>When:</strong> Banking, healthcare, huge enterprise ($50k+/year customers)</p>
+
+  <h4>2. Schema Per Tenant (PostgreSQL)</h4>
+  <p><strong>How:</strong> One database, separate schemas for each tenant.</p>
+  <p><strong>Pros:</strong></p>
+  <ul>
+    <li>Good isolation (logical separation)</li>
+    <li>One connection pool</li>
+    <li>Better than shared DB for compliance</li>
+  </ul>
+  <p><strong>Cons:</strong></p>
+  <ul>
+    <li>Schema routing complexity</li>
+    <li>Still need to run migrations × tenants</li>
+  </ul>
+  <p><strong>When:</strong> Mid-market SaaS (50-500 tenants)</p>
+
+  <h4>3. Shared DB + tenantId (Our Choice)</h4>
+  <p><strong>How:</strong> One database, every row has tenantId field.</p>
+  <p><strong>Pros:</strong></p>
+  <ul>
+    <li>Lowest cost (one cluster for thousands)</li>
+    <li>Simplest operations (one migration)</li>
+    <li>Easy cross-tenant analytics</li>
+  </ul>
+  <p><strong>Cons:</strong></p>
+  <ul>
+    <li>Code-enforced isolation (plugin must be bulletproof)</li>
+    <li>One bug = data leak across companies</li>
+  </ul>
+  <p><strong>When:</strong> Startups, SMB SaaS, most modern apps</p>
+
+  <div class="callout">
+    <h4>Decision Framework</h4>
+    <p>Start with shared DB + tenantId. Migrate specific high-value tenants to dedicated databases later if needed. Don't over-architect for isolation you don't need yet.</p>
+  </div>
+</section>
+
+<section id="security">
+  <h2>Section 14: Security Deep Dive</h2>
+
+  <h3>1. JWT Security</h3>
+  <ul>
+    <li><strong>Algorithm:</strong> HS256 (HMAC + SHA-256)</li>
+    <li><strong>Secret rotation:</strong> Not implemented yet (would invalidate all tokens)</li>
+    <li><strong>Payload:</strong> Never store sensitive data (passwords, payment info)</li>
+  </ul>
+
+  <h3>2. Password Security</h3>
+  <ul>
+    <li><strong>Bcrypt:</strong> 12 salt rounds (~100ms per hash)</li>
+    <li><strong>Never store plain text</strong></li>
+    <li><strong>Timing attack prevention:</strong> Always run bcrypt on login</li>
+  </ul>
+
+  <h3>3. SQL Injection (Doesn't Apply)</h3>
+  <p>MongoDB + Mongoose uses BSON encoding, not string concatenation. Query objects prevent injection.</p>
+
+  <h3>4. XSS Prevention</h3>
+  <p>API returns JSON only. Frontend must sanitize before rendering HTML.</p>
+
+  <h3>5. CSRF (Not Needed)</h3>
+  <p>We're a pure API with JWT in Authorization header. No cookies = no CSRF risk.</p>
+
+  <h3>6. CORS</h3>
+  <pre><code>app.use(cors({
+  origin: process.env.FRONTEND_URL,
+  credentials: true
+}));</code></pre>
+
+  <h3>7. Rate Limiting</h3>
+  <p>See Section 4 — prevents brute force and DDoS.</p>
+
+  <h3>8. Input Validation (TODO)</h3>
+  <p>Should add Zod or Joi schemas to validate request bodies before processing.</p>
+</section>
+
+<section id="stripe">
+  <h2>Section 15: Stripe Webhooks (Planned)</h2>
+
+  <h3>The Goal</h3>
+  <p>When a company upgrades their subscription on Stripe, automatically update their plan in our database and credit them projects.</p>
+
+  <h3>POST /api/webhooks/stripe</h3>
+  <pre><code>import Stripe from 'stripe';
+const stripe = new Stripe(process.env.STRIPE_SECRET);
+
+export async function handleStripeWebhook(req, res) {
+  const sig = req.headers['stripe-signature'];
+
+  // 1. Verify webhook signature (proves it's from Stripe)
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.rawBody,  // Must be raw buffer, not parsed JSON
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    throw new AppError('Invalid webhook signature', 400);
+  }
+
+  // 2. Idempotency check with Redis
+  const eventId = event.id;
+  const key = `stripe:event:${eventId}`;
+
+  const alreadyProcessed = await redis.set(key, '1', {
+    NX: true,  // Only set if key doesn't exist
+    EX: 86400  // 24 hour TTL
+  });
+
+  if (!alreadyProcessed) {
+    // Already processed this event
+    return res.status(200).json({ received: true });
+  }
+
+  // 3. Process event
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed':
+        const session = event.data.object;
+        await handleCheckoutComplete(session);
+        break;
+
+      case 'customer.subscription.updated':
+        const subscription = event.data.object;
+        await handleSubscriptionUpdate(subscription);
+        break;
+
+      case 'customer.subscription.deleted':
+        await handleSubscriptionCanceled(event.data.object);
+        break;
+    }
+  } catch (err) {
+    // Keep Redis key so we don't retry on this webhook
+    // Log error for manual review
+    logger.error({ event, err }, 'Webhook processing failed');
+    throw err;
+  }
+
+  return res.status(200).json({ received: true });
+}
+
+async function handleCheckoutComplete(session) {
+  const tenantId = session.metadata.tenantId;
+
+  await runWithTenant({ tenantId }, async () => {
+    await Tenant.findByIdAndUpdate(tenantId, {
+      plan: 'pro',
+      stripeCustomerId: session.customer,
+      stripeSubscriptionId: session.subscription
+    });
+  });
+}</code></pre>
+
+  <h3>Exactly-Once Processing</h3>
+  <ol class="step-list">
+    <li>Verify signature (security)</li>
+    <li>Redis SET NX with event ID (idempotency)</li>
+    <li>Process event (update database)</li>
+    <li>Return 200 (tell Stripe we're done)</li>
+  </ol>
+
+  <p>If server crashes during step 3, Redis key doesn't exist, so Stripe retry will process it. If we crash after step 3, Redis key exists, so retry gets skipped.</p>
+
+  <div class="callout">
+    <h4>Why Raw Body?</h4>
+    <p>Stripe's signature is computed over the RAW request body. If Express parses it to JSON first, signature verification fails. We need <code>express.raw({ type: 'application/json' })</code> middleware ONLY for webhook route.</p>
+  </div>
+</section>
+
 <section id="interview">
   <h2>Section 16: 15 Hardest Interview Questions</h2>
 

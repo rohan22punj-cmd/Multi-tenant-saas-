@@ -36,16 +36,16 @@ const app = express();
 app.use(requestId);
 
 // ─── Security & parsing ───
-app.use(helmet());           // sets security-related HTTP headers
-app.use(cors());             // allows cross-origin requests (configurable later)
-app.use(express.json());     // parses JSON request bodies
+app.use(helmet()); // sets security-related HTTP headers
+app.use(cors()); // allows cross-origin requests (configurable later)
+app.use(express.json()); // parses JSON request bodies
 
 // ─── Request logging (after parsing, before routes) ───
 app.use(requestLogger);
 
 // ─── Health check (no auth, no rate limit) ───
 app.get('/health', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
+    res.status(200).json({ status: 'ok' });
 });
 
 // ─── Rate limit all /api routes ───
@@ -65,20 +65,21 @@ app.use('/api/users', userRoutes);
 // In Phase 3+, all resource routes (projects, tasks) will use
 // the same middleware chain.
 app.get('/api/me', protect, tenantContextMiddleware, (req, res) => {
-  // getTenantId() reads from AsyncLocalStorage, proving context works
-  const contextTenantId = getTenantId();
-  res.status(200).json({
-    status: 'success',
-    data: {
-      userId: req.user.userId,
-      tenantId: req.user.tenantId,
-      contextTenantId,
-      permissions: req.user.permissions,
-    },
-  });
+    // getTenantId() reads from AsyncLocalStorage, proving context works
+    const contextTenantId = getTenantId();
+    res.status(200).json({
+        status: 'success',
+        data: {
+            userId: req.user.userId,
+            tenantId: req.user.tenantId,
+            contextTenantId,
+            permissions: req.user.permissions,
+        },
+    });
 });
+for (const route of['/api/projects', '/api/tasks']) {
 
-// ─── Central error handler (must be LAST middleware) ───
-app.use(errorHandler);
+    // ─── Central error handler (must be LAST middleware) ───
+    app.use(errorHandler);
 
-export default app;
+    export default app;
