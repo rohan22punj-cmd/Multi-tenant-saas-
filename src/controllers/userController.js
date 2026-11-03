@@ -118,3 +118,106 @@ export const reactivate = asyncHandler(async (req, res) => {
 
   res.status(200).json({ id: target._id, isActive: target.isActive });
 });
+
+/**
+ * PATCH /api/users/:id/role
+ *
+ * Changes a user's role. Combines several security rules:
+ *   a) Cannot change your own role (self-promotion prevention)
+ *   b) Cannot assign a role with permissions you don't have (privilege escalation)
+ *   c) Cannot change the role of someone who has more permissions than you (demotion attack)
+ *   d) Cannot demote the last active admin (company lockout prevention)
+ *   e) If already has that role, return 200 (idempotent)
+ *
+ * On success, clears the user's refreshTokenHash to force re-login with new permissions.
+ *
+ * TRADE-OFF: The user's CURRENT access token keeps the old permissions for up to 15
+ * minutes (until it expires). We don't check the database on every request for performance.
+ * This matters most when demoting someone — they retain elevated access briefly. To cut
+ * that window, add a Redis token blocklist that protect.js checks on each request.
+ */
+export const changeRole = asyncHandler(async (req, res) => {
+  const targetId = req.params.id;
+  const { roleId } = req.body;
+  const callerId = req.user.userId;
+
+  // Validate roleId is a well-formed ObjectId
+  if (!mongoose.Types.ObjectId.isValid(roleId)) {
+    throw new AppError('Invalid role id', 400);
+  }
+
+  // Rule a: cannot change your own role
+  if (targetId === callerId) {
+    throw new AppError('Forbidden', 403);
+  }
+
+  // Fetch target user and new role (tenant plugin scopes both automatically)
+  const target = await User.findById(targetId).populate('roleId');
+  if (!target) {
+    throw new AppError('User not found', 404);
+  }
+
+  const newRole = await Role.findById(roleId).lean();
+  if (!newRole) {
+    throw new AppError('Role not found', 404);
+  }
+
+  // Rule e: already has that role → idempotent success
+  if (target.roleId._id.toString() === roleId) {
+    return res.status(200).json({
+      id: target._id,
+      roleId: target.roleId._id,
+      roleName: target.roleId.name,
+    });
+  }
+
+  const callerPerms = new Set(req.user.permissions);
+
+  // Rule b: privilege check on NEW role — cannot assign permissions you don't have
+  const hasEscalationInNewRole = newRole.permissions.some((p) => !callerPerms.has(p));
+  if (hasEscalationInNewRole) {
+    throw new AppError('Forbidden', 403);
+  }
+
+  // Rule c: privilege check on CURRENT role — cannot change someone with more permissions
+  const currentRole = target.roleId;
+  const hasPrivilegeGapInCurrentRole = currentRole.permissions.some((p) => !callerPerms.has(p));
+  if (hasPrivilegeGapInCurrentRole) {
+    throw new AppError('Forbidden', 403);
+  }
+
+  // Rule d: last-admin check — only matters if target currently IS an admin and we're demoting
+  const targetCurrentlyHasUserManage = currentRole.permissions.includes(PERMISSIONS.USER_MANAGE);
+  const newRoleHasUserManage = newRole.permissions.includes(PERMISSIONS.USER_MANAGE);
+
+  if (targetCurrentlyHasUserManage && !newRoleHasUserManage && target.isActive) {
+    // Find all roles in this tenant that have USER_MANAGE
+    const adminRoles = await Role.find({ permissions: PERMISSIONS.USER_MANAGE }).lean();
+    const adminRoleIds = adminRoles.map((r) => r._id.toString());
+
+    // Count OTHER active users with an admin role (excluding the target)
+    const remainingAdminCount = await User.countDocuments({
+      _id: { $ne: target._id },
+      isActive: true,
+      roleId: { $in: adminRoleIds },
+    });
+
+    if (remainingAdminCount === 0) {
+      throw new AppError('Cannot demote the last admin', 409);
+    }
+  }
+
+  // All checks passed — update role and wipe refresh token
+  target.roleId = roleId;
+  target.refreshTokenHash = null; // forces re-login to get new permissions
+  await target.save();
+
+  // Re-fetch to get the new role's name for the response
+  const updatedUser = await User.findById(targetId).populate('roleId');
+
+  res.status(200).json({
+    id: updatedUser._id,
+    roleId: updatedUser.roleId._id,
+    roleName: updatedUser.roleId.name,
+  });
+});

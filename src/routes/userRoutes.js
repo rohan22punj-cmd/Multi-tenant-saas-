@@ -1,7 +1,7 @@
 /**
- * User routes — deactivate and reactivate endpoints.
+ * User routes — deactivate, reactivate, and role change endpoints.
  *
- * Both routes require:
+ * All routes require:
  *   1. protect        — valid JWT access token
  *   2. requirePermission(USER_MANAGE) — caller must be an admin or have explicit manage rights
  *
@@ -11,7 +11,7 @@
 
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { deactivate, reactivate } from '../controllers/userController.js';
+import { deactivate, reactivate, changeRole } from '../controllers/userController.js';
 import protect from '../middleware/protect.js';
 import { requirePermission } from '../middleware/requirePermission.js';
 import PERMISSIONS from '../constants/permissions.js';
@@ -31,5 +31,6 @@ const guardChain = [protect, requirePermission(PERMISSIONS.USER_MANAGE), validat
 
 router.patch('/:id/deactivate', ...guardChain, deactivate);
 router.patch('/:id/reactivate', ...guardChain, reactivate);
+router.patch('/:id/role', ...guardChain, changeRole);
 
 export default router;
