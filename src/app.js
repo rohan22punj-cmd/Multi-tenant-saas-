@@ -61,7 +61,7 @@ app.use('/api/demo', rbacDemoRoutes);
 // ─── User management routes (deactivate / reactivate) ───
 app.use('/api/users', userRoutes);
 
-// ─── Project routes (to be implemented in Stage 2) ───
+// ─── Project routes (all need protect + requirePermission) ───
 app.use('/api/projects', projectRoutes);
 
 // ─── Protected test route ───
