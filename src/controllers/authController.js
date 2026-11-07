@@ -25,10 +25,15 @@ import {
 import AppError from '../utils/AppError.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import Invite from '../models/Invite.js';
+import User from '../models/User.js';
+import Role from '../models/Role.js';
 import bcrypt from 'bcryptjs';
 import Tenant from '../models/Tenant.js';
 import config from '../config/env.js';
 import crypto from 'node:crypto';
+import { runWithTenant } from '../utils/tenantContext.js';
+
+const BCRYPT_SALT_ROUNDS = 12;
 
 /**
  * POST /api/auth/signup
@@ -152,55 +157,61 @@ export const acceptInvite = asyncHandler(async (req, res) => {
     throw new AppError('Invalid or expired invite', 400);
   }
 
-  // Find the tenant by slug (unscoped)
+  // Find the tenant by slug first. Tenant has no tenantId, so this query
+  // does not need a tenant context.
   const tenant = await Tenant.findOne({ slug: companySlug });
   if (!tenant) {
     throw new AppError('Invalid or expired invite', 400);
   }
 
-  // Inside tenant context, find the invite by token hash and claim it atomically
-  const userId = req.user ? req.user.userId : undefined; // we might not have a user since this is public
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-  // Use findOneAndUpdate with acceptedAt=null to atomically claim the invite
-  // This prevents double-acceptance even with concurrent requests
-  const invite = await Invite.findOneAndUpdate(
-    { tokenHash: crypto.createHash('sha256').update(token).digest('hex'), acceptedAt: null, expiresAt: { $gt: new Date() } },
-    { acceptedAt: new Date(), $set: { tenantId: tenant._id } }, // stamp tenantId
-    { new: true }
-  );
+  // Run everything tenant-owned inside the invite's tenant context. This is
+  // a public route, so protect.js did not establish a context for us.
+  const result = await runWithTenant({ tenantId: tenant._id }, async () => {
+    // Atomically claim the invite. acceptedAt=null + expiry check in the
+    // filter means only one concurrent request can ever match this document.
+    const invite = await Invite.findOneAndUpdate(
+      { tokenHash, acceptedAt: null, expiresAt: { $gt: new Date() } },
+      { acceptedAt: new Date() },
+      { new: true }
+    );
 
-  if (!invite) {
-    // Either wrong token, expired, or already used — same generic message
-    throw new AppError('Invalid or expired invite', 400);
-  }
+    if (!invite) {
+      // Wrong token, expired, or already used — same generic message for all.
+      throw new AppError('Invalid or expired invite', 400);
+    }
 
-  // Now create the user inside the tenant context
-  const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+    const role = await Role.findById(invite.roleId).lean();
+    if (!role) {
+      throw new AppError('Invalid or expired invite', 400);
+    }
 
-  const user = await User.create({
-    name,
-    email: invite.email,
-    passwordHash,
-    roleId: invite.roleId,
-    tenantId: tenant._id,
+    const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+
+    // tenantId is auto-stamped by the tenant plugin from the context above.
+    const user = await User.create({
+      name,
+      email: invite.email,
+      passwordHash,
+      roleId: invite.roleId,
+    });
+
+    const tokens = await issueAndStoreTokens(user, role.permissions);
+
+    return { user, tokens, roleName: role.name };
   });
-
-  // Issue tokens like login does
-  const tokens = await issueAndStoreTokens(user, invite.role.permissions);
-
-  // Mark the invite fully accepted (already done by findOneAndUpdate above)
-  // but also clear the tokenHash optionally
 
   res.status(200).json({
     status: 'success',
     data: {
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken,
+      accessToken: result.tokens.accessToken,
+      refreshToken: result.tokens.refreshToken,
       user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: invite.role.name,
+        id: result.user._id,
+        name: result.user.name,
+        email: result.user.email,
+        role: result.roleName,
       },
     },
   });
@@ -291,6 +302,12 @@ export const invite = asyncHandler(async (req, res) => {
     throw new AppError('User already exists', 409);
   }
 
+  // The JWT has no slug, so look up the caller's tenant to build the link.
+  const tenant = await Tenant.findById(req.user.tenantId).lean();
+  if (!tenant) {
+    throw new AppError('Tenant not found', 404);
+  }
+
   // Check if there's a pending (not accepted, not expired) invite for that email
   const existingInvite = await Invite.findOne({ email, acceptedAt: null, expiresAt: { $gt: new Date() } });
   if (existingInvite) {
@@ -303,7 +320,7 @@ export const invite = asyncHandler(async (req, res) => {
     existingInvite.expiresAt = new Date(Date.now() + config.inviteExpiryDays * 24 * 60 * 60 * 1000);
     await existingInvite.save();
 
-    const inviteLink = `${process.env.APP_URL}/accept-invite?company=${req.user.slug}&token=${rawToken}`;
+    const inviteLink = `${config.appUrl}/accept-invite?company=${tenant.slug}&token=${rawToken}`;
 
     console.debug('Invite link generated (replacement):', inviteLink);
 
@@ -331,7 +348,7 @@ export const invite = asyncHandler(async (req, res) => {
     expiresAt,
   });
 
-  const inviteLink = `${process.env.APP_URL}/accept-invite?company=${req.user.slug}&token=${rawToken}`;
+  const inviteLink = `${config.appUrl}/accept-invite?company=${tenant.slug}&token=${rawToken}`;
 
   console.debug('Invite link generated:', inviteLink);
 

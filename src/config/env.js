@@ -11,6 +11,7 @@ dotenv.config();
 const env = {
   port: parseInt(process.env.PORT, 10) || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
+  appUrl: process.env.APP_URL || 'http://localhost:3000',
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/multitenant',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
   jwt: {

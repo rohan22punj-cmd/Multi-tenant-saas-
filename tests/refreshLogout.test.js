@@ -19,6 +19,7 @@ import jwt from 'jsonwebtoken';
 import app from '../src/app.js';
 import env from '../src/config/env.js';
 import { connectTestDB, clearTestDB, closeTestDB } from './setup.js';
+import { runUnscoped } from '../src/utils/tenantContext.js';
 
 // ─── Lifecycle ─────────────────────────────────────────────
 beforeAll(async () => {
@@ -118,9 +119,11 @@ describe('POST /api/auth/refresh', () => {
 
     // Deactivate user
     const User = (await import('../src/models/User.js')).default;
-    const user = await User.findOne({ email: 'admin@test.com' });
+    const user = await runUnscoped('test: load user to deactivate', () =>
+      User.findOne({ email: 'admin@test.com' }),
+    );
     user.isActive = false;
-    await user.save();
+    await runUnscoped('test: save deactivated user', () => user.save());
 
     const res = await request(app).post('/api/auth/refresh').send({ refreshToken });
     expect(res.status).toBe(401);

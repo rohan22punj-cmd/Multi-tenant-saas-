@@ -77,9 +77,7 @@ app.get('/api/me', protect, tenantContextMiddleware, (req, res) => {
         },
     });
 });
-for (const route of['/api/projects', '/api/tasks']) {
+// ─── Central error handler (must be LAST middleware) ───
+app.use(errorHandler);
 
-    // ─── Central error handler (must be LAST middleware) ───
-    app.use(errorHandler);
-
-    export default app;
+export default app;

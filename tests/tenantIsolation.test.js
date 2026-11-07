@@ -31,6 +31,7 @@ import { runWithTenant, runUnscoped } from '../src/utils/tenantContext.js';
 import User from '../src/models/User.js';
 import Role from '../src/models/Role.js';
 import Tenant from '../src/models/Tenant.js';
+import { ALL_PERMISSIONS } from '../src/constants/permissions.js';
 
 beforeAll(async () => {
   await connectTestDB();
@@ -81,8 +82,8 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
     tenantB = await createTenant('Company B', 'company-b');
 
     // Create roles inside each tenant's context
-    roleA = await createRoleInContext(tenantA._id, 'admin', ['perm:all']);
-    roleB = await createRoleInContext(tenantB._id, 'admin', ['perm:all']);
+    roleA = await createRoleInContext(tenantA._id, 'admin', [...ALL_PERMISSIONS]);
+    roleB = await createRoleInContext(tenantB._id, 'admin', [...ALL_PERMISSIONS]);
 
     // Create users inside each tenant's context
     userA1 = await createUserInContext(tenantA._id, 'Alice A1', 'alice@a.com', PASSWORD_HASH, roleA._id);

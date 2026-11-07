@@ -144,10 +144,12 @@ export function tenantPlugin(schema) {
   // b) READ & WRITE queries — pre hooks to inject tenantId filter
   // ──────────────────────────────────────────────────────────────
   for (const method of READ_METHODS) {
-    schema.pre(method, function (next) {
+    // Mongoose 9 uses async middleware: returning a rejected promise aborts
+    // the query. There is no `next` callback anymore.
+    schema.pre(method, async function () {
       // If unscoped, skip tenant filtering entirely
       if (isUnscoped()) {
-        return next();
+        return;
       }
       // `this` is the Query object for static methods, Document for instance methods
       const tenantId = getTenantId();
@@ -158,7 +160,6 @@ export function tenantPlugin(schema) {
         const filter = this.getFilter();
         applyTenantFilter(filter, tenantId);
       }
-      next();
     });
   }
 
@@ -169,54 +170,69 @@ export function tenantPlugin(schema) {
   // ──────────────────────────────────────────────────────────────
   // c) estimatedDocumentCount — throw on scoped models
   // ──────────────────────────────────────────────────────────────
-  schema.pre('estimatedDocumentCount', function (next) {
+  schema.pre('estimatedDocumentCount', async function () {
     if (isUnscoped()) {
-      return next();
+      return;
     }
-    next(new Error(
+    throw new Error(
       'estimatedDocumentCount() cannot be filtered by tenant and is disabled on tenant-scoped models. ' +
       'Use countDocuments() instead, or wrap in runUnscoped() with a valid reason.'
-    ));
+    );
   });
 
   // ──────────────────────────────────────────────────────────────
   // d) aggregate — inject $match as first stage (unless $geoNear)
   // ──────────────────────────────────────────────────────────────
-  schema.pre('aggregate', function (next) {
+  schema.pre('aggregate', async function () {
     if (isUnscoped()) {
-      return next();
+      return;
     }
     const tenantId = getTenantId();
     const pipeline = this.pipeline();
     injectAggregateMatch(pipeline, tenantId);
-    next();
   });
 
   // ──────────────────────────────────────────────────────────────
   // e) WRITES of new documents — save, create, insertMany
   // ──────────────────────────────────────────────────────────────
-  schema.pre('save', function (next) {
+  // Stamp tenantId BEFORE validation. Mongoose runs `required` checks
+  // during validation, which happens before pre('save'). If we only set
+  // tenantId in pre('save'), a required tenantId would fail first.
+  schema.pre('validate', async function () {
+    if (isUnscoped() || !this.isNew) {
+      return;
+    }
+    const tenantId = getTenantId();
+    if (this.tenantId && !this.tenantId.equals(tenantId)) {
+      throw new Error(
+        `Document tenantId (${this.tenantId}) does not match current context (${tenantId}). ` +
+        'Cannot create a document for a different tenant.'
+      );
+    }
+    this.tenantId = tenantId;
+  });
+
+  schema.pre('save', async function () {
     if (isUnscoped()) {
-      return next();
+      return;
     }
     const tenantId = getTenantId();
 
     if (this.isNew) {
       // New document — stamp tenantId
       if (this.tenantId && !this.tenantId.equals(tenantId)) {
-        return next(new Error(
+        throw new Error(
           `Document tenantId (${this.tenantId}) does not match current context (${tenantId}). ` +
           'Cannot create a document for a different tenant.'
-        ));
+        );
       }
       this.tenantId = tenantId;
     } else {
       // Existing document — ensure tenantId is not being changed
       if (this.isModified('tenantId')) {
-        return next(new Error('Changing tenantId is not allowed. A document can never move between tenants.'));
+        throw new Error('Changing tenantId is not allowed. A document can never move between tenants.');
       }
     }
-    next();
   });
 
   // create() goes through save() internally for each doc, so the pre('save') hook handles it.
@@ -227,14 +243,13 @@ export function tenantPlugin(schema) {
   // ──────────────────────────────────────────────────────────────
   const updateMethods = ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace'];
   for (const method of updateMethods) {
-    schema.pre(method, function (next) {
+    schema.pre(method, async function () {
       if (isUnscoped()) {
-        return next();
+        return;
       }
       // For query middleware, update document is in this._update
       const update = this.getUpdate();
       assertNoTenantIdChange(update);
-      next();
     });
   }
 
@@ -247,15 +262,15 @@ export function tenantPlugin(schema) {
   // complex and error-prone. Instead, we throw a clear error directing
   // the developer to use runUnscoped() with an explicit reason if they
   // truly need bulkWrite (rare — usually for migrations or seeding).
-  schema.pre('bulkWrite', function (next) {
+  schema.pre('bulkWrite', async function () {
     if (isUnscoped()) {
-      return next();
+      return;
     }
-    next(new Error(
+    throw new Error(
       'bulkWrite() is not supported on tenant-scoped models. ' +
       'It accepts arbitrary operations that cannot be safely auto-scoped. ' +
       'Use runUnscoped(reason, callback) with a valid justification if absolutely necessary.'
-    ));
+    );
   });
 }
 

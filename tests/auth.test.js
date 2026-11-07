@@ -31,6 +31,7 @@ import jwt from 'jsonwebtoken';
 import app from '../src/app.js';
 import env from '../src/config/env.js';
 import { connectTestDB, clearTestDB, closeTestDB } from './setup.js';
+import { runUnscoped } from '../src/utils/tenantContext.js';
 
 // ─── Lifecycle ─────────────────────────────────────────────
 
@@ -229,9 +230,11 @@ describe('POST /api/auth/login', () => {
   it('rejects login for a deactivated user', async () => {
     // First, deactivate the user
     const User = (await import('../src/models/User.js')).default;
-    const user = await User.findOne({ email: 'alice@acme.com' });
+    const user = await runUnscoped('test: load user to deactivate', () =>
+      User.findOne({ email: 'alice@acme.com' }),
+    );
     user.isActive = false;
-    await user.save();
+    await runUnscoped('test: save deactivated user', () => user.save());
 
     const res = await request(app).post('/api/auth/login').send({
       companySlug: 'acme-corp',
@@ -390,9 +393,11 @@ describe('POST /api/auth/refresh', () => {
 
     // Deactivate the user
     const User = (await import('../src/models/User.js')).default;
-    const user = await User.findOne({ email: 'alice@acme.com' });
+    const user = await runUnscoped('test: load user to deactivate', () =>
+      User.findOne({ email: 'alice@acme.com' }),
+    );
     user.isActive = false;
-    await user.save();
+    await runUnscoped('test: save deactivated user', () => user.save());
 
     const res = await request(app).post('/api/auth/refresh').send({
       refreshToken: signup.body.data.refreshToken,
