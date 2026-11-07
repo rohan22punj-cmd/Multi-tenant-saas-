@@ -29,6 +29,7 @@ import { getTenantId } from './utils/tenantContext.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 import rbacDemoRoutes from './routes/rbacDemo.routes.js';
 import userRoutes from './routes/userRoutes.js';
+import projectRoutes from './routes/projectRoutes.js';
 
 const app = express();
 
@@ -59,6 +60,9 @@ app.use('/api/demo', rbacDemoRoutes);
 
 // ─── User management routes (deactivate / reactivate) ───
 app.use('/api/users', userRoutes);
+
+// ─── Project routes (to be implemented in Stage 2) ───
+app.use('/api/projects', projectRoutes);
 
 // ─── Protected test route ───
 // Demonstrates that protect + tenantContext work together.
