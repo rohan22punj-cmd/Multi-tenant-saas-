@@ -33,6 +33,26 @@ const tenantSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    /**
+     * Number of NON-ARCHIVED projects this tenant currently has.
+     *
+     * WHY A COUNTER INSTEAD OF COUNTING PROJECTS EVERY TIME:
+     * Two simultaneous "create project" requests can both read "2 projects"
+     * and both decide they are under the Free limit of 3, ending up with 4.
+     * We prevent that race with one atomic conditional update on this single
+     * document (see services/planService.js). MongoDB applies each update
+     * one at a time, so the second request's `projectCount < 3` condition
+     * fails once the first request has incremented it to 3.
+     *
+     * The counter is maintained by the app: +1 on create/unarchive,
+     * -1 on archive/delete. If it ever drifts, planService recounts the
+     * real projects and repairs it (self-healing).
+     */
+    projectCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
   { timestamps: true },
 );

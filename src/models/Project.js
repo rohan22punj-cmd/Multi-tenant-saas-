@@ -1,1 +1,54 @@
-/**\n * Project model — a company's project/initiative.\n *\n * BELONGS TO one tenant (company). Each project sits inside one company.\n * isArchived defaults to false; archiving hides it from lists unless ?includeArchived=true.\n *\n * TENANT PLUGIN:\n * Applied below. Every query is automatically scoped to the current\n * tenant from AsyncLocalStorage. The project's tenantId is always\n * enforced — a user from Company A cannot \"find\" Company B's projects.\n */\n\nimport mongoose from 'mongoose';\nimport tenantPlugin from '../plugins/tenantPlugin.js';\n\nconst projectSchema = new mongoose.Schema(\n  {\n    name: {\n      type: String,\n      required: [true, 'Project name is required'],\n      trim: true,\n    },\n    description: {\n      type: String,\n      trim: true,\n    },\n    isArchived: {\n      type: Boolean,\n      default: false,\n    },\n  },\n  { timestamps: true }\n);\n\n// The tenantPlugin will add the tenantId field (ObjectId, ref Tenant, required, indexed)\n// if it doesn't already exist. We don't define it here to avoid duplication.\n\n// Compound index: tenantId + createdAt (newest first) for list queries\nprojectSchema.index({ tenantId: 1, createdAt: -1 });\n\n// Apply the tenant filter plugin — automatic scoping to current tenant\nprojectSchema.plugin(tenantPlugin);\n\nconst Project = mongoose.model('Project', projectSchema);\nexport default Project;
+/**
+ * Project model — a company's project/initiative.
+ *
+ * BELONGS TO one tenant (company). Each project sits inside one company.
+ * isArchived defaults to false; archived projects are hidden from lists
+ * unless the caller passes ?includeArchived=true.
+ *
+ * createdBy is stamped from the verified JWT (req.user.userId). It is never
+ * accepted from a request body and never changed afterwards.
+ *
+ * TENANT PLUGIN:
+ * Applied below. Every query is automatically scoped to the current tenant
+ * from AsyncLocalStorage, so a user from Company A cannot read or modify
+ * Company B's projects even if they know the id.
+ */
+
+import mongoose from 'mongoose';
+import tenantPlugin from '../plugins/tenantPlugin.js';
+
+const projectSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: [true, 'Project name is required'],
+      trim: true,
+    },
+    description: {
+      type: String,
+      trim: true,
+    },
+    isArchived: {
+      type: Boolean,
+      default: false,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      // Optional at schema level so older/seeded rows stay valid, but the
+      // create endpoint always stamps it from the token.
+    },
+  },
+  { timestamps: true }
+);
+
+// The tenantPlugin adds the tenantId field (ObjectId, ref Tenant, required,
+// indexed) if the schema does not already define it.
+
+// List queries: newest first, always for one tenant.
+projectSchema.index({ tenantId: 1, createdAt: -1 });
+
+projectSchema.plugin(tenantPlugin);
+
+const Project = mongoose.model('Project', projectSchema);
+export default Project;
