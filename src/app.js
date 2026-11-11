@@ -30,6 +30,8 @@ import { generalLimiter } from './middleware/rateLimiter.js';
 import rbacDemoRoutes from './routes/rbacDemo.routes.js';
 import userRoutes from './routes/userRoutes.js';
 import projectRoutes from './routes/projectRoutes.js';
+import taskRoutes from './routes/taskRoutes.js';
+import activityRoutes from './routes/activityRoutes.js';
 
 const app = express();
 
@@ -63,6 +65,13 @@ app.use('/api/users', userRoutes);
 
 // ─── Project routes (all need protect + requirePermission) ───
 app.use('/api/projects', projectRoutes);
+
+// ─── Task routes (mounted at /api: covers /api/tasks/* and
+//     /api/projects/:projectId/tasks) ───
+app.use('/api', taskRoutes);
+
+// ─── Activity feed (read-only, user:manage) ───
+app.use('/api/activity', activityRoutes);
 
 // ─── Protected test route ───
 // Demonstrates that protect + tenantContext work together.

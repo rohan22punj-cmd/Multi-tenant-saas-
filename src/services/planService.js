@@ -21,13 +21,16 @@
  * and is rejected with 402. No transaction (and therefore no replica set)
  * is required.
  *
- * The counter is an optimization over the source of truth (the projects
- * collection). If it ever drifts, we recount and repair it — see the
- * self-healing branch in reserveProjectSlot().
+ * IMPORTANT: we never "recount and retry" on the rejection path. A recount
+ * cannot tell the difference between (a) the counter really drifted and
+ * (b) another request has already reserved a slot but has not inserted its
+ * project yet. Treating (b) as (a) would hand out the same slot twice and
+ * break the guarantee above. Drift is avoided instead by always releasing
+ * the slot on every failure path (see releaseProjectSlot callers), so a
+ * client that races and loses simply retries after the winner commits.
  */
 
 import Tenant from '../models/Tenant.js';
-import Project from '../models/Project.js';
 import AppError from '../utils/AppError.js';
 import { getPlanLimits } from '../config/plans.js';
 
@@ -70,29 +73,10 @@ export async function reserveProjectSlot(tenantId) {
     return { reserved: true, limit, plan: tenant.plan };
   }
 
-  // The conditional update failed. Either the limit really is reached, or
-  // the counter drifted above reality (e.g. a crash between a project
-  // delete and its counter release). Recount from the projects collection
-  // — the source of truth — and repair the counter once, then retry.
-  const actualCount = await Project.countDocuments({ isArchived: false });
-
-  if (actualCount < limit) {
-    await Tenant.updateOne(
-      { _id: tenantId },
-      { $set: { projectCount: actualCount } }
-    );
-
-    const retried = await Tenant.findOneAndUpdate(
-      { _id: tenantId, projectCount: { $lt: limit } },
-      { $inc: { projectCount: 1 } },
-      { new: true }
-    );
-
-    if (retried) {
-      return { reserved: true, limit, plan: tenant.plan };
-    }
-  }
-
+  // The conditional update matched nothing: the counter is already at the
+  // limit. Exactly one concurrent request can win the update above, so we
+  // reject without recounting (see the header for why a recount-and-retry
+  // would be wrong here).
   return { reserved: false, limit, plan: tenant.plan };
 }
 

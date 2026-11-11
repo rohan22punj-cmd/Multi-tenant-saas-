@@ -45,8 +45,10 @@ const tenantSchema = new mongoose.Schema(
      * fails once the first request has incremented it to 3.
      *
      * The counter is maintained by the app: +1 on create/unarchive,
-     * -1 on archive/delete. If it ever drifts, planService recounts the
-     * real projects and repairs it (self-healing).
+     * -1 on archive/delete, with a compensating -1 whenever a create
+     * fails after reserving. planService deliberately does NOT recount on
+     * rejection, because a recount cannot distinguish real drift from a
+     * concurrent request that reserved a slot but has not inserted yet.
      */
     projectCount: {
       type: Number,
