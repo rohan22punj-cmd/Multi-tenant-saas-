@@ -1,0 +1,23 @@
+  console.error
+    ◇ injected env (0) from .env
+
+    [0m [90m  7 |[39m
+     [90m  8 |[39m [36mimport[39m dotenv [36mfrom[39m [32m'dotenv'[39m[33m;[39m
+    [31m[1m>[22m[39m[90m  9 |[39m dotenv[33m.[39mconfig()[33m;[39m
+     [90m    |[39m        [31m[1m^[22m[39m
+     [90m 10 |[39m
+     [90m 11 |[39m [36mconst[39m env [33m=[39m {
+     [90m 12 |[39m   port[33m:[39m parseInt(process[33m.[39menv[33m.[39m[33mPORT[39m[33m,[39m [35m10[39m) [33m||[39m [35m3000[39m[33m,[39m[0m
+
+      at se (node_modules/dotenv/dist/index.cjs:7:155)
+      at Object.ce [as configDotenv] (node_modules/dotenv/dist/index.cjs:7:1059)
+      at Object.ae [as config] (node_modules/dotenv/dist/index.cjs:7:1168)
+      at src/config/env.js:9:8
+
+(node:51276) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+Test Suites: 1 passed, 1 total
+Tests:       7 passed, 7 total
+Snapshots:   0 total
+Time:        10.384 s
+Ran all test suites matching tests/rbac.test.js.

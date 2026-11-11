@@ -1,0 +1,42 @@
+  console.error
+    ◇ injected env (0) from .env
+
+    [0m [90m  7 |[39m
+     [90m  8 |[39m [36mimport[39m dotenv [36mfrom[39m [32m'dotenv'[39m[33m;[39m
+    [31m[1m>[22m[39m[90m  9 |[39m dotenv[33m.[39mconfig()[33m;[39m
+     [90m    |[39m        [31m[1m^[22m[39m
+     [90m 10 |[39m
+     [90m 11 |[39m [36mconst[39m env [33m=[39m {
+     [90m 12 |[39m   port[33m:[39m parseInt(process[33m.[39menv[33m.[39m[33mPORT[39m[33m,[39m [35m10[39m) [33m||[39m [35m3000[39m[33m,[39m[0m
+
+      at se (node_modules/dotenv/dist/index.cjs:7:155)
+      at Object.ce [as configDotenv] (node_modules/dotenv/dist/index.cjs:7:1059)
+      at Object.ae [as config] (node_modules/dotenv/dist/index.cjs:7:1168)
+      at src/config/env.js:9:8
+
+(node:72416) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:72416) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+FAIL tests/tenantIsolation.test.js (13.813 s)
+  ● Regression — Existing Auth Tests Still Pass › same email in different companies can log in to their own tenant
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 200
+    Received: 401
+
+    [0m [90m 635 |[39m     })[33m;[39m
+     [90m 636 |[39m
+    [31m[1m>[22m[39m[90m 637 |[39m     expect(res1[33m.[39mstatus)[33m.[39mtoBe([35m200[39m)[33m;[39m
+     [90m     |[39m                         [31m[1m^[22m[39m
+     [90m 638 |[39m     expect(res2[33m.[39mstatus)[33m.[39mtoBe([35m200[39m)[33m;[39m
+     [90m 639 |[39m
+     [90m 640 |[39m     [36mconst[39m decoded1 [33m=[39m jwt[33m.[39mverify(res1[33m.[39mbody[33m.[39mdata[33m.[39maccessToken[33m,[39m env[33m.[39mjwt[33m.[39maccessSecret)[33m;[39m[0m
+
+      at Object.<anonymous> (tests/tenantIsolation.test.js:637:25)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 52 passed, 53 total
+Snapshots:   0 total
+Time:        13.902 s, estimated 43 s
+Ran all test suites matching tests/tenantIsolation.test.js.

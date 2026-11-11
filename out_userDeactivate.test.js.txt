@@ -1,0 +1,89 @@
+  console.error
+    ◇ injected env (0) from .env
+
+    [0m [90m  7 |[39m
+     [90m  8 |[39m [36mimport[39m dotenv [36mfrom[39m [32m'dotenv'[39m[33m;[39m
+    [31m[1m>[22m[39m[90m  9 |[39m dotenv[33m.[39mconfig()[33m;[39m
+     [90m    |[39m        [31m[1m^[22m[39m
+     [90m 10 |[39m
+     [90m 11 |[39m [36mconst[39m env [33m=[39m {
+     [90m 12 |[39m   port[33m:[39m parseInt(process[33m.[39menv[33m.[39m[33mPORT[39m[33m,[39m [35m10[39m) [33m||[39m [35m3000[39m[33m,[39m[0m
+
+      at se (node_modules/dotenv/dist/index.cjs:7:155)
+      at Object.ce [as configDotenv] (node_modules/dotenv/dist/index.cjs:7:1059)
+      at Object.ae [as config] (node_modules/dotenv/dist/index.cjs:7:1168)
+      at src/config/env.js:9:8
+
+(node:11464) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=acmecorp&token=50915dd3799fc66f2beed3a4da668a814fcef36533a24b261038b6d6a92b951f
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=betacorp&token=37af40a753716dacb9c0d6aea41e9c6394be2bf717134d8678017d2839f5a680
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=gammacorp&token=2479aa119abc58208e0cccca4469be7fe3259a762d6a48433a63f08235ded4fa
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=deltacorp&token=cea7bb2c991c1ba5fcc901d747aa44b84b82bc9cb790ce65f9068b23c5b52982
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=zetacorp&token=8f0d1059812044e0295cd1ea883029bce54c91cb5d9fdc1bd51ca938c905f4b5
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=etacorp&token=f99cb9e3c03b7dc9fc4e220ba68de0f89eea4b3ef791c459d9b0e1f57acf3b90
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=thetacorp&token=d7ef89656e36a7d5db39ae247e8fdc21d191421ce6e08392701829d4c25f28d7
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+  console.debug
+    Invite link generated: http://localhost:3000/accept-invite?company=kappacorp&token=570decf9070e30d8ffe9643b17a3c77abf2c6d286be0cf7e25d73db84dbd04e5
+
+      at src/controllers/authController.js:353:11
+
+(node:11464) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+FAIL tests/userDeactivate.test.js (14.933 s)
+  ● PATCH /api/users/:id/deactivate and /reactivate › reactivated member can log in
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 200
+    Received: 401
+
+    [0m [90m 219 |[39m
+     [90m 220 |[39m     [36mconst[39m loginRes [33m=[39m [36mawait[39m loginAs({ companySlug[33m:[39m tenantSlug[33m,[39m email[33m:[39m [32m'member@gamma.com'[39m })[33m;[39m
+    [31m[1m>[22m[39m[90m 221 |[39m     expect(loginRes[33m.[39mstatus)[33m.[39mtoBe([35m200[39m)[33m;[39m
+     [90m     |[39m                             [31m[1m^[22m[39m
+     [90m 222 |[39m   })[33m;[39m
+     [90m 223 |[39m
+     [90m 224 |[39m   [90m// ── 4. Member (no USER_MANAGE) gets 403 ─────────────────────────────────[39m[0m
+
+      at Object.<anonymous> (tests/userDeactivate.test.js:221:29)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 12 passed, 13 total
+Snapshots:   0 total
+Time:        15.044 s, estimated 60 s
+Ran all test suites matching tests/userDeactivate.test.js.
