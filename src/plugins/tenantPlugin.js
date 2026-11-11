@@ -24,8 +24,11 @@
  * WHY FORCE-SET tenantId INSTEAD OF JUST ADDING IT?
  * If we merely added tenantId to the filter when missing, a malicious or
  * buggy caller could pass their own tenantId and see another company's data.
- * By FORCE-OVERWRITING any tenantId in the caller's filter, we guarantee
- * the current request's tenant ALWAYS wins. The caller's tenantId is ignored.
+ * By FORCE-SETTING the tenantId in the caller's filter, we guarantee the
+ * current request's tenant ALWAYS wins. If the caller asked for a DIFFERENT
+ * tenant, the filter is made to match nothing rather than being rewritten,
+ * because rewriting would widen the query to the caller's whole tenant
+ * (e.g. updateMany/deleteMany would hit every row the caller owns).
  *
  * WHY THROW WHEN NO CONTEXT?
  * getTenantId() throws if called outside a tenant context. If we caught that
@@ -66,9 +69,26 @@ const WRITE_METHODS = [
  * @param {mongoose.Types.ObjectId} tenantId - current tenant from context
  */
 function applyTenantFilter(filter, tenantId) {
-  if (filter && typeof filter === 'object') {
-    filter.tenantId = tenantId;
+  if (!filter || typeof filter !== 'object') return;
+
+  // A filter that explicitly asks for a DIFFERENT tenant is suspicious and
+  // must never be silently rewritten to "my tenant":
+  //   updateMany({ tenantId: B })  ->  would become updateMany({ tenantId: A })
+  // which matches every document the caller owns. Instead, make the filter
+  // match nothing at all, so the operation is a no-op.
+  const requested = filter.tenantId;
+  if (requested !== undefined) {
+    const requestedText =
+      requested && typeof requested === 'object' && !requested._bsontype
+        ? JSON.stringify(requested)
+        : String(requested);
+
+    if (requestedText !== String(tenantId)) {
+      filter._id = { $in: [] };
+    }
   }
+
+  filter.tenantId = tenantId;
 }
 
 /**

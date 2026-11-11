@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import app from '../src/app.js';
 import env from '../src/config/env.js';
 import { connectTestDB, clearTestDB, closeTestDB } from './setup.js';
+import { loginAsMember } from './helpers.js';
 
 beforeAll(async () => {
   await connectTestDB();
@@ -179,7 +180,14 @@ describe('RBAC Permission Demo Routes', () => {
       });
 
     const companyAToken = companyA.body.data.accessToken;
-    const companyBToken = companyB.body.data.accessToken;
+    // Signup always creates an admin. This test is about a *member*, so
+    // create a real member in company B and use that member's token.
+    const companyBClaims = jwt.decode(companyB.body.data.accessToken);
+    const companyBMember = await loginAsMember({
+      tenantId: companyBClaims.tenantId,
+      slug: 'companyb',
+    });
+    const companyBToken = companyBMember.token;
 
     // Company A admin should access all demo routes
     const aRead = await request(app)

@@ -42,6 +42,35 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { PERMISSIONS } from '../constants/permissions.js';
 
 /**
+ * Per-tenant in-process mutex.
+ *
+ * The "last admin" guards below are read-check-then-write: two admins can
+ * demote each other at the same moment, both see "one other admin remains",
+ * and the company ends up with no admin at all. Serializing the check and
+ * the write per tenant closes that window.
+ *
+ * LIMIT: this only serializes requests handled by this Node process. If the
+ * API runs on several instances, replace it with a distributed lock (Redis
+ * SET NX / MongoDB lease) — the call sites stay the same.
+ */
+const tenantLocks = new Map();
+
+function withTenantLock(tenantId, task) {
+  const key = String(tenantId);
+  const previous = tenantLocks.get(key) || Promise.resolve();
+  const run = previous.then(() => task());
+
+  // Keep the chain alive whether the task fulfilled or rejected.
+  const tail = run.catch(() => {});
+  tenantLocks.set(key, tail);
+  tail.then(() => {
+    if (tenantLocks.get(key) === tail) tenantLocks.delete(key);
+  });
+
+  return run;
+}
+
+/**
  * PATCH /api/users/:id/deactivate
  *
  * Sets isActive = false and clears refreshTokenHash.
@@ -151,6 +180,9 @@ export const changeRole = asyncHandler(async (req, res) => {
     throw new AppError('Forbidden', 403);
   }
 
+  // The last-admin count below is only meaningful if no other role change
+  // for this tenant is interleaved, so serialize the check + write.
+  return withTenantLock(req.user.tenantId, async () => {
   // Fetch target user and new role (tenant plugin scopes both automatically)
   const target = await User.findById(targetId).populate('roleId');
   if (!target) {
@@ -219,5 +251,6 @@ export const changeRole = asyncHandler(async (req, res) => {
     id: updatedUser._id,
     roleId: updatedUser.roleId._id,
     roleName: updatedUser.roleId.name,
+  });
   });
 });

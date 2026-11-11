@@ -52,11 +52,11 @@ async function createTenant(name, slug) {
 }
 
 async function createRoleInContext(tenantId, name, permissions) {
-  return runWithTenant({ tenantId }, () => Role.create({ name, permissions, isSystemRole: true }));
+  return runWithTenant({ tenantId }, async () => Role.create({ name, permissions, isSystemRole: true }));
 }
 
 async function createUserInContext(tenantId, name, email, passwordHash, roleId) {
-  return runWithTenant({ tenantId }, () => User.create({
+  return runWithTenant({ tenantId }, async () => User.create({
     name,
     email,
     passwordHash,
@@ -93,31 +93,31 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
   describe('find / findOne / findById', () => {
     it('inside A context, find() returns only A users', async () => {
-      const users = await runWithTenant({ tenantId: tenantA._id }, () => User.find().lean());
+      const users = await runWithTenant({ tenantId: tenantA._id }, async () => User.find().lean());
       expect(users).toHaveLength(2);
       expect(users.every(u => u.tenantId.equals(tenantA._id))).toBe(true);
     });
 
     it('inside A context, findById with B user id returns null', async () => {
-      const user = await runWithTenant({ tenantId: tenantA._id }, () => User.findById(userB1._id).lean());
+      const user = await runWithTenant({ tenantId: tenantA._id }, async () => User.findById(userB1._id).lean());
       expect(user).toBeNull();
     });
 
     it('inside A context, findOne with B user id returns null', async () => {
-      const user = await runWithTenant({ tenantId: tenantA._id }, () => User.findOne({ _id: userB1._id }).lean());
+      const user = await runWithTenant({ tenantId: tenantA._id }, async () => User.findOne({ _id: userB1._id }).lean());
       expect(user).toBeNull();
     });
 
     it('inside A context, findOne with explicit B tenantId filter returns null (forced overwrite)', async () => {
       // Even though the caller explicitly asks for B's tenantId, the plugin force-overwrites it
-      const user = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const user = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.findOne({ tenantId: tenantB._id, email: 'bob@b.com' }).lean()
       );
       expect(user).toBeNull();
     });
 
     it('inside B context, find() returns only B users', async () => {
-      const users = await runWithTenant({ tenantId: tenantB._id }, () => User.find().lean());
+      const users = await runWithTenant({ tenantId: tenantB._id }, async () => User.find().lean());
       expect(users).toHaveLength(1);
       expect(users[0].tenantId.equals(tenantB._id)).toBe(true);
     });
@@ -127,7 +127,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
     it('inside A context, updateOne on B user matches 0 and does not modify', async () => {
       const originalName = userB1.name;
 
-      const result = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.updateOne({ _id: userB1._id }, { name: 'HACKED' })
       );
 
@@ -135,12 +135,12 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
       expect(result.modifiedCount).toBe(0);
 
       // Verify B's user unchanged (unscoped check)
-      const unchanged = await runUnscoped('test: verify B user unchanged', () => User.findById(userB1._id).lean());
+      const unchanged = await runUnscoped('test: verify B user unchanged', async () => User.findById(userB1._id).lean());
       expect(unchanged.name).toBe(originalName);
     });
 
     it('inside A context, updateMany on B users matches 0', async () => {
-      const result = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.updateMany({ tenantId: tenantB._id }, { name: 'HACKED' })
       );
       expect(result.matchedCount).toBe(0);
@@ -148,62 +148,62 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
     });
 
     it('inside A context, findOneAndUpdate on B user returns null', async () => {
-      const result = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.findOneAndUpdate({ _id: userB1._id }, { name: 'HACKED' }, { new: true }).lean()
       );
       expect(result).toBeNull();
     });
 
     it('inside A context, updateOne on A user works normally', async () => {
-      const result = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.updateOne({ _id: userA1._id }, { name: 'Alice Updated' })
       );
       expect(result.matchedCount).toBe(1);
       expect(result.modifiedCount).toBe(1);
 
-      const updated = await runWithTenant({ tenantId: tenantA._id }, () => User.findById(userA1._id).lean());
+      const updated = await runWithTenant({ tenantId: tenantA._id }, async () => User.findById(userA1._id).lean());
       expect(updated.name).toBe('Alice Updated');
     });
   });
 
   describe('deleteOne / deleteMany', () => {
     it('inside A context, deleteOne on B user deletes 0', async () => {
-      const result = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.deleteOne({ _id: userB1._id })
       );
       expect(result.deletedCount).toBe(0);
 
       // Verify B's user still exists
-      const exists = await runUnscoped('test: verify B user exists', () => User.findById(userB1._id).lean());
+      const exists = await runUnscoped('test: verify B user exists', async () => User.findById(userB1._id).lean());
       expect(exists).not.toBeNull();
     });
 
     it('inside A context, deleteMany with B tenantId filter deletes 0', async () => {
-      const result = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.deleteMany({ tenantId: tenantB._id })
       );
       expect(result.deletedCount).toBe(0);
     });
 
     it('inside A context, deleteOne on A user works', async () => {
-      const result = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.deleteOne({ _id: userA2._id })
       );
       expect(result.deletedCount).toBe(1);
 
-      const remaining = await runWithTenant({ tenantId: tenantA._id }, () => User.find().lean());
+      const remaining = await runWithTenant({ tenantId: tenantA._id }, async () => User.find().lean());
       expect(remaining).toHaveLength(1);
     });
   });
 
   describe('countDocuments / distinct', () => {
     it('countDocuments in A context only counts A users', async () => {
-      const count = await runWithTenant({ tenantId: tenantA._id }, () => User.countDocuments());
+      const count = await runWithTenant({ tenantId: tenantA._id }, async () => User.countDocuments());
       expect(count).toBe(2);
     });
 
     it('distinct in A context only sees A emails', async () => {
-      const emails = await runWithTenant({ tenantId: tenantA._id }, () => User.distinct('email'));
+      const emails = await runWithTenant({ tenantId: tenantA._id }, async () => User.distinct('email'));
       expect(emails).toHaveLength(2);
       expect(emails).toEqual(expect.arrayContaining(['alice@a.com', 'alice2@a.com']));
       expect(emails).not.toContain('bob@b.com');
@@ -212,7 +212,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
   describe('aggregate', () => {
     it('aggregate in A context only returns A users', async () => {
-      const results = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const results = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.aggregate([
           { $project: { name: 1, email: 1, tenantId: 1 } },
           { $sort: { email: 1 } },
@@ -224,14 +224,14 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
     it('aggregate with $geoNear as first stage throws clear error', async () => {
       // Create a user with location for geoNear test
-      await runWithTenant({ tenantId: tenantA._id }, () =>
+      await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.create({ name: 'Geo User', email: 'geo@a.com', passwordHash: PASSWORD_HASH, roleId: roleA._id, location: { type: 'Point', coordinates: [0, 0] } })
       );
 
       // We need to add a 2dsphere index for $geoNear to work, but we just test the error
       // The plugin should throw before reaching MongoDB
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () =>
+        runWithTenant({ tenantId: tenantA._id }, async () =>
           User.aggregate([{ $geoNear: { near: { type: 'Point', coordinates: [0, 0] }, distanceField: 'dist' } }])
         )
       ).rejects.toThrow(/geoNear/i);
@@ -242,7 +242,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
     it('populate across models stays scoped to current tenant', async () => {
       // Create a role for A (already have roleA)
       // Populate userA1's role
-      const userWithRole = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const userWithRole = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.findById(userA1._id).populate('roleId').lean()
       );
       expect(userWithRole).not.toBeNull();
@@ -253,7 +253,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
     it('populate in A context cannot see B roles', async () => {
       // Try to populate with a role from B - should not find it
-      const userWithWrongRole = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const userWithWrongRole = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.findById(userA1._id).populate({ path: 'roleId', match: { _id: roleB._id } }).lean()
       );
       expect(userWithWrongRole.roleId).toBeNull();
@@ -262,7 +262,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
   describe('document creation (save / create / insertMany)', () => {
     it('creating a document in A context auto-stamps A tenantId', async () => {
-      const user = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const user = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.create({ name: 'New User', email: 'new@a.com', passwordHash: PASSWORD_HASH, roleId: roleA._id })
       );
       expect(user.tenantId.equals(tenantA._id)).toBe(true);
@@ -270,14 +270,14 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
     it('creating a document with explicit B tenantId in A context throws', async () => {
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () =>
+        runWithTenant({ tenantId: tenantA._id }, async () =>
           User.create({ name: 'Hacker', email: 'hack@a.com', passwordHash: PASSWORD_HASH, roleId: roleA._id, tenantId: tenantB._id })
         )
       ).rejects.toThrow(/does not match current context/i);
     });
 
     it('insertMany in A context stamps all docs with A tenantId', async () => {
-      const users = await runWithTenant({ tenantId: tenantA._id }, () =>
+      const users = await runWithTenant({ tenantId: tenantA._id }, async () =>
         User.insertMany([
           { name: 'Batch 1', email: 'batch1@a.com', passwordHash: PASSWORD_HASH, roleId: roleA._id },
           { name: 'Batch 2', email: 'batch2@a.com', passwordHash: PASSWORD_HASH, roleId: roleA._id },
@@ -288,11 +288,11 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
     });
 
     it('save on existing document in A context does not allow tenantId change', async () => {
-      const user = await runWithTenant({ tenantId: tenantA._id }, () => User.findById(userA1._id));
+      const user = await runWithTenant({ tenantId: tenantA._id }, async () => User.findById(userA1._id));
       user.tenantId = tenantB._id;
 
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () => user.save())
+        runWithTenant({ tenantId: tenantA._id }, async () => user.save())
       ).rejects.toThrow(/changing tenantId is not allowed/i);
     });
   });
@@ -300,7 +300,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
   describe('blocking tenantId changes on updates', () => {
     it('updateOne with $set tenantId throws', async () => {
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () =>
+        runWithTenant({ tenantId: tenantA._id }, async () =>
           User.updateOne({ _id: userA1._id }, { $set: { tenantId: tenantB._id } })
         )
       ).rejects.toThrow(/changing tenantId via \$set is not allowed/i);
@@ -308,7 +308,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
     it('updateOne with direct tenantId in update doc throws', async () => {
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () =>
+        runWithTenant({ tenantId: tenantA._id }, async () =>
           User.updateOne({ _id: userA1._id }, { tenantId: tenantB._id })
         )
       ).rejects.toThrow(/changing tenantId is not allowed/i);
@@ -316,7 +316,7 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
 
     it('replaceOne with tenantId throws', async () => {
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () =>
+        runWithTenant({ tenantId: tenantA._id }, async () =>
           User.replaceOne({ _id: userA1._id }, { name: 'Replaced', email: 'replaced@a.com', passwordHash: PASSWORD_HASH, roleId: roleA._id, tenantId: tenantB._id })
         )
       ).rejects.toThrow(/changing tenantId is not allowed/i);
@@ -366,20 +366,20 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
   describe('estimatedDocumentCount and bulkWrite throw on scoped models', () => {
     it('estimatedDocumentCount throws clear error', async () => {
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () => User.estimatedDocumentCount())
+        runWithTenant({ tenantId: tenantA._id }, async () => User.estimatedDocumentCount())
       ).rejects.toThrow(/estimatedDocumentCount.*cannot be filtered by tenant/i);
     });
 
     it('bulkWrite throws clear error', async () => {
       await expect(
-        runWithTenant({ tenantId: tenantA._id }, () =>
+        runWithTenant({ tenantId: tenantA._id }, async () =>
           User.bulkWrite([{ insertOne: { document: { name: 'Test', email: 'test@test.com', passwordHash: PASSWORD_HASH, roleId: roleA._id } } }])
         )
       ).rejects.toThrow(/bulkWrite.*not supported on tenant-scoped models/i);
     });
 
     it('estimatedDocumentCount works inside runUnscoped', async () => {
-      const count = await runUnscoped('test: count all users unscoped', () => User.estimatedDocumentCount());
+      const count = await runUnscoped('test: count all users unscoped', async () => User.estimatedDocumentCount());
       expect(count).toBe(3); // userA1, userA2, userB1
     });
 
@@ -390,33 +390,33 @@ describe('Tenant Isolation — Unit Level (direct model calls)', () => {
           { insertOne: { document: { name: 'Bulk 2', email: 'bulk2@test.com', passwordHash: PASSWORD_HASH, roleId: roleB._id, tenantId: tenantB._id } } },
         ]);
       });
-      const all = await runUnscoped('test: verify bulk insert', () => User.find().lean());
+      const all = await runUnscoped('test: verify bulk insert', async () => User.find().lean());
       expect(all).toHaveLength(5); // 3 original + 2 new
     });
   });
 
   describe('runUnscoped escape hatch', () => {
     it('runUnscoped sees both companies\' users', async () => {
-      const allUsers = await runUnscoped('test: list all users for admin dashboard', () => User.find().lean());
+      const allUsers = await runUnscoped('test: list all users for admin dashboard', async () => User.find().lean());
       expect(allUsers).toHaveLength(3);
       const tenantIds = [...new Set(allUsers.map(u => u.tenantId.toString()))];
       expect(tenantIds).toHaveLength(2);
     });
 
     it('runUnscoped sees both companies\' roles', async () => {
-      const allRoles = await runUnscoped('test: list all roles for audit', () => Role.find().lean());
+      const allRoles = await runUnscoped('test: list all roles for audit', async () => Role.find().lean());
       expect(allRoles).toHaveLength(2);
     });
 
     it('runUnscoped logs a warning with the reason', async () => {
       // We can't easily test the logger output here, but we verify the function exists and works
-      const result = await runUnscoped('test reason', () => User.countDocuments());
+      const result = await runUnscoped('test reason', async () => User.countDocuments());
       expect(typeof result).toBe('number');
     });
 
     it('runUnscoped requires a non-empty reason', async () => {
-      await expect(runUnscoped('', () => User.find())).rejects.toThrow(/requires a non-empty reason/);
-      await expect(runUnscoped('   ', () => User.find())).rejects.toThrow(/requires a non-empty reason/);
+      await expect(runUnscoped('', async () => User.find())).rejects.toThrow(/requires a non-empty reason/);
+      await expect(runUnscoped('   ', async () => User.find())).rejects.toThrow(/requires a non-empty reason/);
     });
   });
 });

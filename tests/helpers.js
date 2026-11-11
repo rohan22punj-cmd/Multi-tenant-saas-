@@ -9,6 +9,7 @@
 
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import app from '../src/app.js';
 import User from '../src/models/User.js';
 import Role from '../src/models/Role.js';
@@ -42,11 +43,15 @@ export async function signupCompany({
     );
   }
 
+  // The signup response's `user` object only carries id/name/email. The
+  // verified access token is the source of truth for tenantId and roleId.
+  const claims = jwt.decode(res.body.data.accessToken);
+
   return {
     token: res.body.data.accessToken,
     userId: res.body.data.user.id,
-    tenantId: res.body.data.user.tenantId,
-    roleId: res.body.data.user.roleId,
+    tenantId: claims.tenantId,
+    roleId: claims.roleId,
     slug: res.body.data.tenant.slug,
     companyName: name,
     email: adminEmail,
@@ -71,18 +76,28 @@ export async function createCompanyUser(
   const userEmail = email || `member-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
   const { tenantId } = company;
 
-  const role = await runWithTenant({ tenantId }, () =>
-    Role.findOne({ name: roleName })
-  );
+  // The query MUST be awaited inside the callback: runWithTenant exits its
+  // context as soon as the callback returns, so returning a bare Query would
+  // execute it later, outside the tenant context.
+  const role = await runWithTenant({ tenantId }, async () => {
+    return await Role.findOne({ name: roleName });
+  });
   if (!role) {
     throw new Error(`role "${roleName}" not found for tenant`);
   }
 
   const passwordHash = await bcrypt.hash(password, 4);
 
-  const user = await runWithTenant({ tenantId }, () =>
-    User.create({ tenantId, name, email: userEmail, passwordHash, roleId: role._id, isActive })
-  );
+  const user = await runWithTenant({ tenantId }, async () => {
+    return await User.create({
+      tenantId,
+      name,
+      email: userEmail,
+      passwordHash,
+      roleId: role._id,
+      isActive,
+    });
+  });
 
   return { id: user._id.toString(), email: userEmail, password };
 }

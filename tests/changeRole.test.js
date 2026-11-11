@@ -8,6 +8,7 @@
 
 import request from 'supertest';
 import mongoose from 'mongoose';
+import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import app from '../src/app.js';
 import User from '../src/models/User.js';
@@ -37,12 +38,15 @@ beforeEach(async () => {
 
   adminToken = adminSignup.body.data.accessToken;
   adminUserId = adminSignup.body.data.user.id;
-  tenantId = adminSignup.body.data.user.tenantId;
-  adminRoleId = adminSignup.body.data.user.roleId;
+  // The signup response's user object carries only id/name/email; the
+  // verified access token is the source of truth for tenantId and roleId.
+  const adminClaims = jwt.decode(adminToken);
+  tenantId = adminClaims.tenantId;
+  adminRoleId = adminClaims.roleId;
   companySlug = adminSignup.body.data.tenant.slug;
 
   // Create a member in the SAME tenant by directly creating the user
-  const memberRoleDoc = await runWithTenant({ tenantId }, () =>
+  const memberRoleDoc = await runWithTenant({ tenantId }, async () =>
     Role.findOne({ tenantId, name: 'member' }),
   );
   memberRoleId = memberRoleDoc._id.toString();
@@ -86,7 +90,7 @@ describe('PATCH /api/users/:id/role', () => {
 
     expect(demoteRes.status).toBe(200);
     expect(demoteRes.body.roleId).toBe(memberRoleId);
-    expect(promoteRes.body.roleName).toBe('member');
+    expect(demoteRes.body.roleName).toBe('member');
   });
 
   test('after role change, old refresh token returns 401, new token has new permissions', async () => {
@@ -144,7 +148,7 @@ describe('PATCH /api/users/:id/role', () => {
 
   test('user with some permissions cannot assign role with more permissions → 403', async () => {
     // Create a "moderator" role with only some permissions
-    const modRole = await runWithTenant({ tenantId }, () =>
+    const modRole = await runWithTenant({ tenantId }, async () =>
       Role.create({
         tenantId,
         name: 'moderator',
@@ -153,7 +157,7 @@ describe('PATCH /api/users/:id/role', () => {
     );
 
     // Give the member the moderator role
-    await runWithTenant({ tenantId }, () =>
+    await runWithTenant({ tenantId }, async () =>
       User.findByIdAndUpdate(memberUserId, { roleId: modRole._id }),
     );
 
@@ -185,7 +189,7 @@ describe('PATCH /api/users/:id/role', () => {
 
   test('user cannot change role of someone with more permissions → 403', async () => {
     // Create a "moderator" role with only some permissions
-    const modRole = await runWithTenant({ tenantId }, () =>
+    const modRole = await runWithTenant({ tenantId }, async () =>
       Role.create({
         tenantId,
         name: 'moderator',
@@ -194,7 +198,7 @@ describe('PATCH /api/users/:id/role', () => {
     );
 
     // Give the member the moderator role
-    await runWithTenant({ tenantId }, () =>
+    await runWithTenant({ tenantId }, async () =>
       User.findByIdAndUpdate(memberUserId, { roleId: modRole._id }),
     );
 
@@ -446,7 +450,7 @@ describe('PATCH /api/users/:id/role', () => {
       .post('/api/auth/signup')
       .send({ companyName: 'Company B', adminName: 'Company B Admin', email: 'adminB@test.com', password: 'pass1234' });
     const companyBUserId = companyBSignup.body.data.user.id;
-    const companyBRoleId = companyBSignup.body.data.user.roleId;
+    const companyBRoleId = jwt.decode(companyBSignup.body.data.accessToken).roleId;
 
     // Company A admin tries to change Company B user's role → 404
     const res1 = await request(app)
