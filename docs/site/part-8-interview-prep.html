@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 8: Interview Prep - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 8: Interview Preparation</h1>
+        <p class="badge built">BUILT</p>
+
+        <p class="callout interview-tip">
+          <strong>Interview Tip:</strong> Practice speaking about your project clearly and concisely. Focus on the "why" behind your decisions and be honest about trade-offs and limitations. This shows critical thinking.
+        </p>
+
+        <h2>1. The Pitch: 2-Minute Version</h2>
+        <p>This pitch gives a high-level overview, hits the key challenges, and highlights your solutions. Practice it aloud!</p>
+        <div style="background: var(--color-code-bg); padding: 15px; border-radius: 5px; margin-bottom: 1em;">
+          <p style="font-family: var(--font-family-body); color: var(--color-text);">
+            "I built a Multi-Tenant SaaS backend. The core challenge is data isolation — many companies share the same database, but one company's data must never leak into another's queries. I solved this by making `tenantId` the only way to scope data, always coming from a verified JWT. The tenant plugin hooks into every Mongoose query to automatically filter by tenant. Role-based access control uses explicit permission keys like `project:create`, never fragile role names. Important security features include refresh token hashing and rotation to prevent session hijacking, and a dummy bcrypt compare in login to prevent timing attacks and user enumeration. This project also features race-safe plan limits using atomic database operations and structured logging for auditability. Stripe billing is designed, but not yet built, with a robust webhook idempotency strategy in mind. The hard parts were ensuring tenant isolation across all Mongoose operations, managing concurrent access for plan limits, and designing a secure authentication flow that is both robust and performant. This project showcases how to build a scalable and secure foundation for any SaaS application."
+          </p>
+          <button class="toggle-btn" id="pitch-timer-toggle" data-state="stopped">Start Timer</button>
+          <span id="pitch-timer" style="margin-left: 10px; font-weight: bold;">0:00</span>
+        </div>
+
+        <h2>2. The Pitch: 30-Second Version</h2>
+        <p>A concise summary for quick introductions.</p>
+        <div style="background: var(--color-code-bg); padding: 15px; border-radius: 5px; margin-bottom: 1em;">
+          <p style="font-family: var(--font-family-body); color: var(--color-text);">
+            "This is a multi-tenant SaaS backend with RBAC. It uses a shared MongoDB database, but strictly isolates each company's data using a custom Mongoose plugin. Authentication is JWT-based with refresh token rotation. `tenantId` is always from the verified token. RBAC is permission-key driven. Stripe billing is designed but not yet built, but the architectural considerations for webhooks are fully planned."
+          </p>
+        </div>
+
+        <h2>3. Hardest Interview Questions & Answers</h2>
+        <p>Click to reveal answers. Your confidence will be tracked. (<span id="confident-count">0</span> of 15 confident)</p>
+        <div class="practice-header">
+            <button id="shuffle-questions">Shuffle Questions</button>
+            <button id="hide-all-answers">Hide All Answers</button>
+            <button id="show-all-answers">Show All Answers</button>
+        </div>
+        <div id="questions-container">
+            <!-- Questions will be loaded here by JavaScript -->
+        </div>
+
+        <h2>4. Trade-offs I Made and Would Explain</h2>
+        <p>Being able to articulate trade-offs is a sign of a senior engineer.</p>
+        <ul>
+          <li><strong>Shared Database with `tenantId`</strong>:
+            <p><strong>Trade-off:</strong> Lower cost and simpler deployments than database-per-tenant, but increases the risk of data leaks if tenant filtering fails. This project mitigates this by enforcing `tenantId` at the Mongoose plugin level (data layer) for all operations, making it extremely hard to bypass. It's suitable for most SaaS companies, especially early-stage ones, but highly regulated industries might prefer physical separation.</p>
+          </li>
+          <li><strong>15-minute Token Window (after deactivation/role change)</strong>:
+            <p><strong>Trade-off:</strong> For performance, access tokens are stateless and not checked against the database on every request. This means a deactivated user or one with a demoted role might retain their old permissions for up to 15 minutes (the token's expiry). This was an acceptable trade-off for a simple project to avoid the complexity of a real-time revocation list (e.g., Redis blocklist), which would add a database call to every protected request.</p>
+            <div class="code-block-header">src/middleware/protect.js</div>
+            <pre><code class="language-javascript">import { verifyAccessToken } from '../utils/tokens.js';
+import AppError from '../utils/AppError.js';
+import { runWithTenant } from '../utils/tenantContext.js';
+
+const UNAUTHORIZED = 'Unauthorized';
+
+const protect = async (req, _res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new AppError(UNAUTHORIZED, 401);
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  let decoded;
+  try {
+    decoded = verifyAccessToken(token);
+  } catch {
+    throw new AppError(UNAUTHORIZED, 401);
+  }
+
+  req.user = {
+    userId: decoded.userId,
+    tenantId: decoded.tenantId,
+    roleId: decoded.roleId,
+    permissions: decoded.permissions || [],
+  };
+
+  runWithTenant(
+    { tenantId: decoded.tenantId, userId: decoded.userId },
+    () => next()
+  );
+};
+
+export default protect;</code></pre>
+            <p><strong>Fix for a bigger company:</strong> Implement a Redis-backed token blocklist. When a user is deactivated or their role changes, their `jti` (JWT ID) from the access token is added to Redis with the access token's remaining expiry. The `protect.js` middleware would then check this blocklist on every request, providing near-instant revocation.</p>
+          </li>
+          <li><strong>Hashed Refresh Tokens (in DB)</strong>:
+            <p><strong>Trade-off:</strong> Storing hashes instead of raw refresh tokens protects against database breaches, as attackers cannot reverse the hashes into usable tokens. This is a strong security posture. The cost is slightly increased complexity in the authentication service for hashing and comparing.</p>
+            <div class="code-block-header">src/services/authService.js</div>
+            <pre><code class="language-javascript">function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// ...
+
+export async function issueAndStoreTokens(user, permissions) {
+  const accessToken = signAccessToken(buildAccessPayload(user, permissions));
+  const refreshToken = signRefreshToken(buildRefreshPayload(user));
+
+  user.refreshTokenHash = hashToken(refreshToken); // Storing the hash
+  await user.save();
+
+  return { accessToken, refreshToken };
+}</code></pre>
+          </li>
+          <li><strong>Redis plus Database Unique Index (PLANNED for Webhook Idempotency)</strong>:
+            <p><strong>Trade-off:</strong> This is a belt-and-suspenders approach to idempotency. Redis provides a fast, temporary claim (`SET NX EX`) to prevent immediate duplicates and handle retry logic (release key on error). The database unique index on `eventId` (<code>StripeEvent</code> collection) provides a durable, transactional backup for long-term exactly-once processing, even if Redis is down or data is lost. It adds complexity but guarantees reliability for critical financial operations.</p>
+          </li>
+        </ul>
+
+        <h2>5. If I Had 3 More Months</h2>
+        <p>A short, honest list of what comes next.</p>
+        <ol>
+          <li><strong>Complete Stripe Integration</strong>: Fully implement checkout, customer portal, and the webhook handler as designed, including the Redis/DB idempotency.</li>
+          <li><strong>Build a Simple Frontend</strong>: Demonstrate the backend's features (signup, login, create projects/tasks, manage users, view activity) with a basic React/Vue/Svelte frontend. This would make the project a full-stack demo.</li>
+          <li><strong>Add Email Service</strong>: Integrate with an email provider (SendGrid, Mailgun) for sending invite emails and password reset links.</li>
+          <li><strong>Implement Password Reset Flow</strong>: Securely handle forgot password requests with token-based email verification.</li>
+          <li><strong>Advanced RBAC Features</strong>: Allow dynamic role creation and permission assignment through the API. Implement multi-tenant roles, not just system-defined ones.</li>
+          <li><strong>API Documentation</strong>: Generate OpenAPI/Swagger docs for all endpoints.</li>
+          <li><strong>CI/CD Pipeline</strong>: Set up GitHub Actions or GitLab CI for automated testing and deployment.</li>
+          <li><strong>Horizontal Scaling for `withTenantLock`</strong>: Replace the in-memory `withTenantLock` mutex with a distributed lock (e.g., Redis-based) to support multiple Node.js instances.</li>
+        </ol>
+
+        <div class="prev-next-nav">
+          <a href="part-7-testing.html" id="prev-link">Previous: Part 7</a>
+          <a href="part-9-glossary.html" id="next-link">Next: Part 9</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+  <script>
+    // Interview prep specific JS
+    const questions = [
+      { q: "How does tenant isolation work in this project?", a: "Isolation is enforced by a Mongoose plugin that automatically injects the `tenantId` from AsyncLocalStorage into every query. This ensures that every database operation is scoped to the current tenant, preventing data leaks." },
+      { q: "What happens if a request body includes `tenantId`? Is it used for scoping?", a: "No, a caller-supplied `tenantId` in the request body is never trusted. The tenant plugin force-overwrites any `tenantId` in the query filter with the verified `tenantId` from the JWT, or makes the query return no results if a different `tenantId` was explicitly requested." },
+      { q: "How do you prevent timing attacks on login and user enumeration?", a: "The `login` service always performs a `bcrypt.compare` operation, even if the user or tenant doesn't exist or is inactive. In such cases, it compares the provided password against a `DUMMY_HASH`, ensuring that every login attempt takes roughly the same amount of time, preventing attackers from inferring valid usernames or emails based on response time." },
+      { q: "Why are refresh tokens stored only as hashes, not raw tokens?", a: "Storing SHA-256 hashes of refresh tokens (and invite tokens) means that if the database is breached, attackers only get one-way hashes. They cannot reverse these hashes to obtain valid, usable tokens, significantly reducing the impact of a data leak." },
+      { q: "Explain refresh token rotation and reuse detection.", a: "On a refresh, a new pair of access and refresh tokens is issued, and the *hash* of the new refresh token replaces the old one in the database (rotation). If an old, already-used refresh token is presented, it indicates a replay attack. In this case, the stored refresh token hash is immediately cleared (`null`), effectively invalidating *all* active sessions for that user (reuse detection), forcing them to re-login." },
+      { q: "Why are permissions checked by key (`project:create`) instead of role names (`admin`)?", a: "Role names can be changed by an administrator in the database, leading to brittle code if logic depends on them. Permission keys are stable constants in the codebase (`src/constants/permissions.js`) that directly map to API capabilities. Checking by key ensures that the authorization logic remains robust even if role names are modified." },
+      { q: "What is the '15-minute window' and why do you accept it?", a: "After a user is deactivated or their role permissions change, their currently active access token (which is stateless) remains valid until its natural expiry (default 15 minutes). This was an accepted trade-off for performance, avoiding a database lookup on every single API request for token revocation. For higher security needs, a Redis-backed blocklist could be implemented to achieve near-instant revocation." },
+      { q: "How do you prevent race conditions for plan limits (e.g., project creation)?", a: "The project limit is enforced using an atomic conditional update on the `projectCount` field in the `Tenant` document. Instead of reading the count and then writing, a single `findOneAndUpdate` operation is used with a condition `projectCount: { $lt: limit }`. MongoDB serializes updates to a single document, ensuring that only one concurrent request can successfully increment the count when at the boundary." },
+      { q: "Explain AsyncLocalStorage and why it's used for tenant context.", a: "AsyncLocalStorage acts like a private notepad that follows an asynchronous operation (like an HTTP request) through its entire lifecycle. It allows `tenantId` (and `userId`) to be set once by the `protect` middleware and then accessed by any downstream code (services, Mongoose plugins) without explicitly passing it through every function argument. This keeps the data layer clean and framework-agnostic." },
+      { q: "Why does `getTenantId()` throw an error when no context is set, instead of returning `undefined`?", a: "Returning `undefined` would silently allow database queries to run without a `tenantId` filter, leading to a catastrophic data leak (seeing all tenants' data). By throwing an explicit error, the developer is immediately alerted to a missing tenant context, making security bugs loud and obvious during development rather than silent in production." },
+      { q: "Describe the planned Stripe webhook handler's idempotency strategy.", a: "The planned strategy uses a two-layer approach: 1. Redis `SETNX EX` with the event ID to claim an event for processing. If the claim fails, check the Redis value: 'done' means skip, 'processing' means retry later (409/500). If processing fails after claiming, the Redis key is deleted to allow retry. 2. A `StripeEvent` collection in MongoDB with a unique index on `eventId` acts as a durable backup. If Redis is down, this unique index prevents duplicate processing transactionally." },
+      { q: "How do you handle privilege escalation when changing roles or deactivating users?", a: "Multiple privilege checks are in place: 1. A user cannot change their own role or deactivate themselves. 2. A caller cannot assign a role with permissions they do not possess. 3. A caller cannot change the role of (or deactivate) someone who currently has *more* permissions than the caller. These rules ensure that lower-privileged users cannot manipulate higher-privileged accounts." },
+      { q: "What is the 'last admin' rule and how is it enforced?", a: "The 'last admin' rule prevents the sole active administrator (or user with `USER_MANAGE` permission) from being deactivated or demoted. This avoids a lockout scenario where no one can manage users. It's enforced by counting other active users with `USER_MANAGE` permission before allowing such an operation. This check is wrapped in a `withTenantLock` mutex to prevent race conditions in multi-admin scenarios." },
+      { q: "What are the limitations of `runUnscoped()`?", a: "`runUnscoped()` is an escape hatch that temporarily bypasses the tenant filter. It is inherently dangerous and is restricted: it requires an explicit `reason` string to force justification and logs a warning. It should only be used for system-level operations on the `Tenant` model itself or cross-tenant reports, never for normal request processing." },
+      { q: "What happens if you try to modify a document's `tenantId`?", a: "The Mongoose `tenantPlugin` explicitly blocks any attempt to change a document's `tenantId` (via `$set`, `$unset`, or direct replacement). This is a critical security measure: a document should never be able to move between tenants, even accidentally, as this would violate strict data isolation." }
+    ];
+
+    const questionsContainer = document.getElementById('questions-container');
+    const confidentCountSpan = document.getElementById('confident-count');
+    const shuffleButton = document.getElementById('shuffle-questions');
+    const hideAllButton = document.getElementById('hide-all-answers');
+    const showAllButton = document.getElementById('show-all-answers');
+
+    let questionStates = JSON.parse(localStorage.getItem('interview-question-states')) || {};
+
+    function renderQuestions(shuffledQuestions = questions) {
+      questionsContainer.innerHTML = '';
+      shuffledQuestions.forEach((q, index) => {
+        const card = document.createElement('div');
+        card.className = 'question-card';
+        card.innerHTML = `
+          <div class="question">${index + 1}. ${escapeHtml(q.q)}</div>
+          <div class="answer">${escapeHtml(q.a)}</div>
+          <button class="toggle-btn show-answer-btn">Show Answer</button>
+          <button class="toggle-btn confidence-btn" data-confident="${questionStates[q.q] === true ? 'true' : 'false'}">
+            ${questionStates[q.q] === true ? 'Practice again' : 'Got it'}
+          </button>
+        `;
+        questionsContainer.appendChild(card);
+      });
+      addEventListenersToQuestionCards();
+      updateConfidentCount();
+    }
+
+    function addEventListenersToQuestionCards() {
+      questionsContainer.querySelectorAll('.question-card').forEach(card => {
+        const showAnswerBtn = card.querySelector('.show-answer-btn');
+        const confidenceBtn = card.querySelector('.confidence-btn');
+        const answerDiv = card.querySelector('.answer');
+        const questionText = card.querySelector('.question').textContent.substring(card.querySelector('.question').textContent.indexOf('.') + 2).trim(); // Extract raw question text
+
+        // Initial state for answer visibility
+        if (showAnswerBtn) {
+          showAnswerBtn.addEventListener('click', () => {
+            answerDiv.classList.toggle('visible');
+            showAnswerBtn.textContent = answerDiv.classList.contains('visible') ? 'Hide Answer' : 'Show Answer';
+          });
+        }
+
+
+        // Initial state for confidence button
+        if (confidenceBtn) {
+          const isConfident = questionStates[questionText] === true;
+          confidenceBtn.dataset.confident = isConfident;
+          confidenceBtn.textContent = isConfident ? 'Practice again' : 'Got it';
+
+          confidenceBtn.addEventListener('click', () => {
+            const currentConfidentState = confidenceBtn.dataset.confident === 'true';
+            confidenceBtn.dataset.confident = (!currentConfidentState).toString();
+            confidenceBtn.textContent = (!currentConfidentState) ? 'Practice again' : 'Got it';
+            questionStates[questionText] = !currentConfidentState;
+            localStorage.setItem('interview-question-states', JSON.stringify(questionStates));
+            updateConfidentCount();
+          });
+        }
+      });
+    }
+
+    function updateConfidentCount() {
+      let count = 0;
+      for (const qText in questionStates) {
+        if (questionStates[qText] === true) {
+          count++;
+        }
+      }
+      confidentCountSpan.textContent = count;
+    }
+
+    function shuffleArray(array) {
+      for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]]; // Swap elements
+      }
+      return array;
+    }
+
+    shuffleButton.addEventListener('click', () => {
+      const shuffled = shuffleArray([...questions]);
+      renderQuestions(shuffled);
+    });
+
+    hideAllButton.addEventListener('click', () => {
+        questionsContainer.querySelectorAll('.answer').forEach(ans => ans.classList.remove('visible'));
+        questionsContainer.querySelectorAll('.show-answer-btn').forEach(btn => btn.textContent = 'Show Answer');
+    });
+
+    showAllButton.addEventListener('click', () => {
+        questionsContainer.querySelectorAll('.answer').forEach(ans => ans.classList.add('visible'));
+        questionsContainer.querySelectorAll('.show-answer-btn').forEach(btn => btn.textContent = 'Hide Answer');
+    });
+
+    // Pitch timer
+    const pitchTimerToggle = document.getElementById('pitch-timer-toggle');
+    const pitchTimerDisplay = document.getElementById('pitch-timer');
+    let timerInterval;
+    let seconds = 0;
+
+    function startTimer() {
+        if (pitchTimerToggle.dataset.state === 'stopped') {
+            seconds = 0;
+            timerInterval = setInterval(() => {
+                seconds++;
+                const minutes = Math.floor(seconds / 60);
+                const remainingSeconds = seconds % 60;
+                pitchTimerDisplay.textContent = `${minutes}:${remainingSeconds < 10 ? '0' : ''}${remainingSeconds}`;
+            }, 1000);
+            pitchTimerToggle.textContent = 'Stop Timer';
+            pitchTimerToggle.dataset.state = 'running';
+        } else {
+            clearInterval(timerInterval);
+            pitchTimerToggle.textContent = 'Start Timer';
+            pitchTimerToggle.dataset.state = 'stopped';
+        }
+    }
+    pitchTimerToggle.addEventListener('click', startTimer);
+
+
+    renderQuestions(); // Initial render
+  </script>
+</body>
+</html>

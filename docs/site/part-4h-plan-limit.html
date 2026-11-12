@@ -1,52 +1,168 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Plan Limit & Atomic Reservation</title>
-    <link rel="stylesheet" href="assets/style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4h: Plan Limit & Atomic Reservation - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
 </head>
 <body>
-    <div class="topbar">
-        <a href="index.html">Home</a>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
     </div>
-    <div class="container">
-        <nav class="sidebar">
-            <ul>
-                <li><a href="part-4g-change-role.html">Previous: Change Role</a></li>
-                <li><strong>Plan Limit & Reservation</strong></li>
-                <li><a href="part-4i-stripe-webhook.html">Next: Stripe Webhook</a></li>
-            </ul>
-        </nav>
-        <main>
-            <h1>Plan Limit & Atomic Reservation</h1>
-            <p>We enforce plan limits (like project counts) by reading the plan directly from the database to ensure immediate enforcement when a company upgrades or downgrades.</p>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
 
-            <h2>Atomic Reservation</h2>
-            <p>To avoid race conditions where concurrent requests exceed the limit, we use an atomic conditional update in <code>src/services/planService.js</code>.</p>
-            <pre><code class="language-javascript">// src/services/planService.js
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
 
-const updated = await Tenant.findOneAndUpdate(
-  { _id: tenantId, projectCount: { $lt: limit } },
-  { $inc: { projectCount: 1 } },
-  { new: true }
-);</code></pre>
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4h: Plan Limit & Atomic Reservation (<code>planService.js</code>)</h1>
 
-            <h2>Handling Failures</h2>
-            <p>Because the update is atomic, we reject the request immediately if it fails (no recount-and-retry is needed, as it would cause double-issuance of slots). <code>projectService.js</code> handles compensation if a project creation fails.</p>
-            <pre><code class="language-javascript">// src/services/projectService.js
+        <p class="callout info">
+          <strong>What this covers:</strong> How the system enforces plan limits (e.g., max 3 projects on Free) using an atomic counter on the Tenant document. The plan is read from the database on every check — not from the JWT — so upgrades/downgrades take effect immediately.
+        </p>
 
+        <h2>Why Not Count Projects?</h2>
+        <p>The naive approach — <code>countDocuments</code> then <code>create</code> — fails under concurrency:</p>
+        <ol>
+          <li>Request A counts 2 projects</li>
+          <li>Request B counts 2 projects</li>
+          <li>Both decide "under limit"</li>
+          <li>Both create → tenant has 4 projects (limit was 3)</li>
+        </ol>
+
+        <h2>Atomic Conditional Update</h2>
+        <p>Instead, we keep a <code>projectCount</code> field on the Tenant and reserve a slot with ONE atomic operation. MongoDB serializes updates to a single document, so only one concurrent request can increment the counter.</p>
+
+        <h3>Source: <code>src/services/planService.js</code></h3>
+        <pre><code class="language-javascript">// src/services/planService.js (lines 55-81)
+
+export async function reserveProjectSlot(tenantId) {
+  const tenant = await getTenantPlan(tenantId);
+  const limit = getPlanLimits(tenant.plan).maxProjects;
+
+  // Pro (or any unlimited plan): always allowed, but still count for
+  // accurate accounting in case the tenant later downgrades.
+  if (limit === Infinity) {
+    await Tenant.findByIdAndUpdate(tenantId, { $inc: { projectCount: 1 } });
+    return { reserved: true, limit, plan: tenant.plan };
+  }
+
+  const updated = await Tenant.findOneAndUpdate(
+    { _id: tenantId, projectCount: { $lt: limit } },
+    { $inc: { projectCount: 1 } },
+    { new: true }
+  );
+
+  if (updated) {
+    return { reserved: true, limit, plan: tenant.plan };
+  }
+
+  // The conditional update matched nothing: the counter is already at the
+  // limit. Exactly one concurrent request can win the update above, so we
+  // reject without recounting (see the header for why a recount-and-retry
+  // would be wrong here).
+  return { reserved: false, limit, plan: tenant.plan };
+}</code></pre>
+
+        <h2>Why No Recount-and-Retry?</h2>
+        <p>If the conditional update fails, we <strong>do not</strong> re-count projects and try again. Here's why:</p>
+
+        <ul>
+          <li>The counter is at the limit because another request <strong>already reserved the slot</strong> but hasn't inserted its project yet</li>
+          <li>A recount would see <code>projectCount === limit</code> and (wrongly) think it can proceed</li>
+          <li>That would hand out the same slot twice, breaking the guarantee</li>
+        </ul>
+
+        <p>Drift is avoided by <strong>always releasing the slot on every failure path</strong> (see <code>releaseProjectSlot</code> callers). A client that races and loses simply retries after the winner commits.</p>
+
+        <h2>Reading the Plan from the Database</h2>
+        <p><code>getTenantPlan</code> reads the Tenant document on every check, not from the JWT.</p>
+
+        <pre><code class="language-javascript">// src/services/planService.js (lines 41-47)
+
+export async function getTenantPlan(tenantId) {
+  const tenant = await Tenant.findById(tenantId).lean();
+  if (!tenant) {
+    throw new AppError('Tenant not found', 404);
+  }
+  return tenant;
+}</code></pre>
+
+        <div class="callout info">
+          <strong>Why?</strong> Access tokens live for 15 minutes and bake in the plan at issuance time. If we trusted the token, a company that upgraded in Stripe would keep the old limits until they re-logged in. Reading the Tenant row makes plan changes take effect immediately.
+        </div>
+
+        <h2>Releasing a Slot</h2>
+        <p>When a project is archived, deleted, or a create fails after reservation, the slot is returned:</p>
+
+        <pre><code class="language-javascript">// src/services/planService.js (lines 88-93)
+
+export async function releaseProjectSlot(tenantId) {
+  await Tenant.updateOne(
+    { _id: tenantId, projectCount: { $gt: 0 } },
+    { $inc: { projectCount: -1 } }
+  );
+}</code></pre>
+
+        <p>The <code>$gt: 0</code> guard prevents the counter from going negative if releases ever double-fire.</p>
+
+        <h2>Compensation in <code>projectService.js</code></h2>
+        <p>If <code>Project.create</code> throws after a slot was reserved, we release it:</p>
+
+        <pre><code class="language-javascript">// src/services/projectService.js (lines 48-66)
+
+const tenantId = getTenantId();
+const slot = await reserveProjectSlot(tenantId);
+
+if (!slot.reserved) {
+  return { limitReached: true, limit: slot.limit, plan: slot.plan };
+}
+
+let project;
 try {
-  project = await Project.create({ ... });
+  project = await Project.create({
+    name,
+    description: body.description,
+    createdBy: actorId,
+  });
 } catch (err) {
-  // Compensate: release the slot back
+  // Compensate: we reserved a slot but created nothing, so hand it back.
   await releaseProjectSlot(tenantId);
   throw err;
 }</code></pre>
-        </main>
-    </div>
-    <script>hljs.highlightAll();</script>
+
+        <p>Similarly, <code>updateProject</code> (un-archiving) and <code>deleteProject</code> call <code>releaseProjectSlot</code> on their failure paths and when archiving/deleting active projects.</p>
+
+        <nav class="prev-next-nav">
+          <a href="part-4g-change-role.html" id="prev-link">Previous: Part 4g</a>
+          <a href="part-4i-stripe-webhook.html" id="next-link">Next: Part 4i</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">
+    Built from the actual Multi-Tenant SaaS codebase
+  </footer>
+
+  <script src="assets/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4f: Invite & Accept-Invite Services - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4f: Invite & Accept-Invite Services (<code>src/controllers/authController.js</code>)</h1>
+
+        <h2><code>src/controllers/authController.js</code></h2>
+        <p>The <code>invite</code> function handles creation of invite links. The <code>acceptInvite</code> function handles redemption of invite tokens. Both enforce security rules such as privilege checks and generic error messages.</p>
+
+        <pre><code class="language-javascript">const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+const result = await runWithTenant({ tenantId: tenant._id }, async () => {
+  const invite = await Invite.findOneAndUpdate(
+    { tokenHash, acceptedAt: null, expiresAt: { $gt: new Date() } },
+    { acceptedAt: new Date() },
+    { new: true }
+  );
+
+  if (!invite) {
+    throw new AppError('Invalid or expired invite', 400);
+  }
+
+  // ... create user, hash password, issue tokens ...
+});</code></pre>
+
+        <h3>Explanation:</h3>
+        <ul>
+          <li><b>Invite token hashing:</b> The invite token is hashed using SHA-256 (<code>hashToken</code> or <code>createHash('sha256')</code>) before being stored in the database, ensuring the raw token is never stored.</li>
+          <li><b>Privilege rule check:</b> The <code>invite</code> function checks that the inviter has all permissions required by the target role. If not, it returns a 403 Forbidden error.</li>
+          <li><b>Atomic invite acceptance:</b> The <code>findOneAndUpdate</code> with <code>acceptedAt: null</code> and <code>expiresAt: { $gt: new Date() }</code> filter ensures only unexpired, unaccepted invites can be accepted, and only one request can claim them (atomic).</li>
+          <li><b>Generic error message:</b> On accept failure, the same generic <code>"Invalid or expired invite"</code> error is returned for all failure cases, preventing information leakage.</li>
+        </ul>
+
+        <div class="prev-next-nav">
+          <a href="part-4e-refresh-service.html" id="prev-link">Previous: Part 4e</a>
+          <a href="part-4g-change-role.html" id="next-link">Next: Part 4g</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

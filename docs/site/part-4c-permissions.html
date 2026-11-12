@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4c: Permissions - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4c: Permissions (<code>permissions.js</code> & <code>requirePermission.js</code>)</h1>
+
+        <h2><code>src/constants/permissions.js</code></h2>
+        <p>This file defines all available permission keys in the system and the default roles (admin and member) that are assigned at signup. It serves as a single source of truth for permission management.</p>
+
+        <pre><code class="language-javascript">export const PERMISSIONS = Object.freeze({
+  // Projects
+  PROJECT_CREATE: 'project:create',
+  PROJECT_READ:   'project:read',
+  PROJECT_UPDATE: 'project:update',
+  PROJECT_DELETE: 'project:delete',
+
+  // Tasks
+  TASK_CREATE:    'task:create',
+  TASK_READ:      'task:read',
+  TASK_UPDATE:    'task:update',
+  TASK_DELETE:    'task:delete',
+
+  // User management
+  USER_INVITE:    'user:invite',
+  USER_MANAGE:    'user:manage',
+
+  // Billing
+  BILLING_VIEW:   'billing:view',
+  BILLING_MANAGE: 'billing:manage',
+});
+
+export const ALL_PERMISSIONS = Object.values(PERMISSIONS);
+
+/**
+ * Default role → permission mappings used at signup.
+ * "admin" gets every permission; "member" gets basic read/task access.
+ * Custom roles can later hold any subset of ALL_PERMISSIONS.
+ */
+export const DEFAULT_ROLES = Object.freeze({
+  admin: [...ALL_PERMISSIONS],
+  member: [
+    PERMISSIONS.PROJECT_READ,
+    PERMISSIONS.TASK_CREATE,
+    PERMISSIONS.TASK_READ,
+    PERMISSIONS.TASK_UPDATE,
+  ],
+});
+
+export default PERMISSIONS;
+</code></pre>
+
+        <h3>Explanation of <code>src/constants/permissions.js</code>:</h3>
+        <ul>
+            <li><code>PERMISSIONS</code>: An <code>Object.freeze()</code>d object containing all distinct permission keys. Each key is a string in the format <code>'resource:action'</code> (e.g., <code>'project:create'</code>, <code>'task:read'</code>). This centralizes permission definitions, making them discoverable and ensuring consistency across the application.</li>
+            <li><code>ALL_PERMISSIONS</code>: An array derived from <code>Object.values(PERMISSIONS)</code>, providing a complete list of all permission keys in the system.</li>
+            <li><code>DEFAULT_ROLES</code>: An <code>Object.freeze()</code>d object defining the permissions associated with the default roles, <code>admin</code> and <code>member</code>, used during user signup.
+                <ul>
+                    <li><code>admin</code>: Is granted all available permissions (<code>ALL_PERMISSIONS</code>).</li>
+                    <li><code>member</code>: Is granted a subset of permissions necessary for basic project and task management (e.g., <code>PROJECT_READ</code>, <code>TASK_CREATE</code>, <code>TASK_READ</code>, <code>TASK_UPDATE</code>).</li>
+                </ul>
+                This structure allows for easy expansion with custom roles later, which can hold any combination of <code>ALL_PERMISSIONS</code>.</li>
+        </ul>
+
+        <h2><code>src/middleware/requirePermission.js</code></h2>
+        <p>This middleware provides functions to enforce role-based access control (RBAC) on routes. It ensures that the authenticated user has the necessary permissions to perform an action.</p>
+
+        <pre><code class="language-javascript">import { ALL_PERMISSIONS } from '../constants/permissions.js';
+import AppError from '../utils/AppError.js';
+
+/**
+ * Validate that every key is a known permission.
+ * Called at module load time (server start) when the middleware is configured,
+ * so typos like 'projct:delete' are caught immediately, not when a user hits the route.
+ */
+const validateKeys = (keys) => {
+  for (const key of keys) {
+    if (!ALL_PERMISSIONS.includes(key)) {
+      throw new Error(`Unknown permission key: ${key}`);
+    }
+  }
+};
+
+/**
+ * requirePermission(...keys) middleware.
+ *
+ * Allows the request only if req.user.permissions contains ALL of the given keys.
+ * Must be used after protect.js. If req.user is missing, returns 401.
+ * If a permission is missing, returns 403 with message "Forbidden".
+ * Unknown permission keys throw at startup (when the middleware is configured),
+ * not when a user hits the route.
+ */
+const requirePermission = (...keys) => {
+  validateKeys(keys);
+  return (req, _res, next) => {
+    if (!req.user) {
+      return next(new AppError('Unauthorized', 401));
+    }
+    const missing = keys.filter((key) => !req.user.permissions.includes(key));
+    if (missing.length > 0) {
+      return next(new AppError('Forbidden', 403));
+    }
+    next();
+  };
+};
+
+/**
+ * requireAnyPermission(...keys) middleware.
+ *
+ * Allows the request if at least one of the given keys matches a permission
+ * in req.user.permissions. If none match, returns 403 with message "Forbidden".
+ * Must be used after protect.js. If req.user is missing, returns 401.
+ * Unknown permission keys throw at startup.
+ */
+const requireAnyPermission = (...keys) => {
+  validateKeys(keys);
+  return (req, _res, next) => {
+    if (!req.user) {
+      return next(new AppError('Unauthorized', 401));
+    }
+    const hasAny = keys.some((key) => req.user.permissions.includes(key));
+    if (!hasAny) {
+      return next(new AppError('Forbidden', 403));
+    }
+    next();
+  };
+};
+
+// Trade-off explanation:
+// Permissions are baked into the JWT access token at issuance.
+// A role change in the database does NOT immediately update existing tokens.
+// The new role permissions take effect only after the user's next token refresh
+// (up to 15 minutes, the access token expiry). This is intentional for Phase 2;
+// a revocation list can be added later if immediate role changes are needed.
+
+export { requirePermission, requireAnyPermission };
+</code></pre>
+
+        <h3>Explanation of <code>src/middleware/requirePermission.js</code>:</h3>
+        <ul>
+            <li><b>Module-load time validation of permission keys:</b> The <code>validateKeys</code> function is called immediately when the module is loaded (i.e., when the server starts). This function iterates through all provided permission keys and checks if they exist in the <code>ALL_PERMISSIONS</code> list from <code>permissions.js</code>. If an unknown key is found, it throws an error, effectively catching typos or undefined permissions at server startup rather than at runtime when a user hits a specific route. This prevents silent failures and makes debugging easier.</li>
+            <li><code>requirePermission(...keys)</code>: This middleware function takes a variable number of permission <code>keys</code> as arguments. It checks if the authenticated user (<code>req.user.permissions</code>, populated by <code>protect.js</code>) possesses <b>all</b> of the specified permissions. If any permission is missing, it returns a 403 Forbidden error. If <code>req.user</code> is not present (meaning the request wasn't authenticated), it returns a 401 Unauthorized error.</li>
+            <li><code>requireAnyPermission(...keys)</code>: Similar to <code>requirePermission</code>, this middleware also takes a variable number of permission <code>keys</code>. However, it only requires the user to have <b>at least one</b> of the specified permissions. If the user has none of the required permissions, it returns a 403 Forbidden error. If <code>req.user</code> is not present, it returns a 401 Unauthorized error.</li>
+            <li><b>Trade-off:</b> Permissions are embedded directly in the JWT access token. This means that if a user's role or permissions are changed in the database, these changes will not take effect immediately. They will only be reflected after the user's current access token expires (typically 15 minutes) and a new one is issued. This design choice prioritizes performance by avoiding a database lookup on every request, with the understanding that immediate permission updates are not a critical requirement for Phase 2 of this project. A revocation list could be implemented later if real-time permission updates become necessary.</li>
+        </ul>
+
+        <div class="prev-next-nav">
+          <a href="part-4b-tenant-plugin.html" id="prev-link">Previous: Part 4b</a>
+          <a href="part-4d-login-service.html" id="next-link">Next: Part 4d</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

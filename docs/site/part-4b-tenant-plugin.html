@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4b: Tenant Plugin - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4b: Tenant Plugin (<code>tenantPlugin.js</code> hook by hook)</h1>
+
+        <h2><code>src/plugins/tenantPlugin.js</code></h2>
+        <p>This Mongoose plugin automatically scopes all database operations to the current tenant, preventing cross-tenant data access. It intercepts various Mongoose hooks to inject <code>tenantId</code> filters or validate operations.</p>
+
+        <pre><code class="language-javascript">import mongoose from 'mongoose';
+import { getTenantId, isUnscoped } from '../utils/tenantContext.js';
+
+const READ_METHODS = [
+  'find',
+  'findOne',
+  'findOneAndUpdate',
+  'findOneAndDelete',
+  'findOneAndReplace',
+  'updateOne',
+  'updateMany',
+  'replaceOne',
+  'deleteOne',
+  'deleteMany',
+  'countDocuments',
+  'distinct',
+];
+
+const WRITE_METHODS = [
+  'save',
+  'create',
+  'insertMany',
+];
+
+/**
+ * Adds a tenantId filter to the query object, FORCE-OVERWRITING any
+ * existing tenantId the caller may have passed.
+ *
+ * @param {Object} filter - Mongoose query filter (will be mutated)
+ * @param {mongoose.Types.ObjectId} tenantId - current tenant from context
+ */
+function applyTenantFilter(filter, tenantId) {
+  if (!filter || typeof filter !== 'object') return;
+
+  // A filter that explicitly asks for a DIFFERENT tenant is suspicious and
+  // must never be silently rewritten to "my tenant":
+  //   updateMany({ tenantId: B })  ->  would become updateMany({ tenantId: A })
+  // which matches every document the caller owns. Instead, make the filter
+  // match nothing at all, so the operation is a no-op.
+  const requested = filter.tenantId;
+  if (requested !== undefined) {
+    const requestedText =
+      requested && typeof requested === 'object' && !requested._bsontype
+        ? JSON.stringify(requested)
+        : String(requested);
+
+    if (requestedText !== String(tenantId)) {
+      filter._id = { $in: [] };
+    }
+  }
+
+  filter.tenantId = tenantId;
+}
+
+/**
+ * Checks if an update document tries to modify tenantId.
+ * Throws if $set, $unset, or direct replacement contains tenantId.
+ *
+ * @param {Object} update - Mongoose update document
+ */
+function assertNoTenantIdChange(update) {
+  if (!update || typeof update !== 'object') return;
+
+  // Direct replacement (replaceOne, findOneAndReplace with a plain object)
+  if (update.tenantId !== undefined) {
+    throw new Error('Changing tenantId is not allowed. A document can never move between tenants.');
+  }
+
+  // $set / $unset operators
+  if (update.$set && update.$set.tenantId !== undefined) {
+    throw new Error('Changing tenantId via $set is not allowed.');
+  }
+  if (update.$unset && update.$unset.tenantId !== undefined) {
+    throw new Error('Unsetting tenantId is not allowed.');
+  }
+}
+
+/**
+ * Inserts a $match stage at the start of an aggregation pipeline.
+ * If the pipeline starts with $geoNear (which MUST be first), we cannot
+ * safely inject our $match before it, so we throw a clear error.
+ *
+ * @param {Array} pipeline - Aggregation pipeline array
+ * @param {mongoose.Types.ObjectId} tenantId - current tenant from context
+ */
+function injectAggregateMatch(pipeline, tenantId) {
+  if (!Array.isArray(pipeline) || pipeline.length === 0) {
+    pipeline.unshift({ $match: { tenantId } });
+    return;
+  }
+
+  const firstStage = pipeline[0];
+  const firstStageKey = firstStage && Object.keys(firstStage)[0];
+
+  // $geoNear MUST be the first stage in a pipeline — we cannot inject
+  // a $match before it. Throw a clear error so the developer knows
+  // to either run it unscoped (via runUnscoped) or restructure.
+  if (firstStageKey === '$geoNear') {
+    throw new Error(
+      'Aggregation pipeline starts with $geoNear, which must be the first stage. ' +
+      'Cannot automatically inject tenant $match. Use runUnscoped() with an explicit reason.'
+    );
+  }
+
+  // Safe to inject at position 0
+  pipeline.unshift({ $match: { tenantId } });
+}
+
+export function tenantPlugin(schema) {
+  // ──────────────────────────────────────────────────────────────
+  // a) Add tenantId field if not already present
+  // ──────────────────────────────────────────────────────────────
+  if (!schema.path('tenantId')) {
+    schema.add({
+      tenantId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Tenant',
+        required: true,
+        index: true,
+      },
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // b) READ & WRITE queries — pre hooks to inject tenantId filter
+  // ──────────────────────────────────────────────────────────────
+  for (const method of READ_METHODS) {
+    // Mongoose 9 uses async middleware: returning a rejected promise aborts
+    // the query. There is no `next` callback anymore.
+    schema.pre(method, async function () {
+      // If unscoped, skip tenant filtering entirely
+      if (isUnscoped()) {
+        return;
+      }
+      // `this` is the Query object for static methods, Document for instance methods
+      const tenantId = getTenantId();
+
+      // For query middleware, `this` is the Query; filter is in this._conditions or passed as first arg
+      // We need to handle both: query middleware gets filter in this.getFilter()
+      if (typeof this.getFilter === 'function') {
+        const filter = this.getFilter();
+        applyTenantFilter(filter, tenantId);
+      }
+    });
+  }
+
+  // Also hook updateOne/updateMany/deleteOne/deleteMany which may receive filter as first arg
+  // The above covers them since they use query middleware, but we also need to catch
+  // the case where filter is passed directly. The getFilter() approach handles it.
+
+  // ──────────────────────────────────────────────────────────────
+  // c) estimatedDocumentCount — throw on scoped models
+  // ──────────────────────────────────────────────────────────────
+  schema.pre('estimatedDocumentCount', async function () {
+    if (isUnscoped()) {
+      return;
+    }
+    throw new Error(
+      'estimatedDocumentCount() cannot be filtered by tenant and is disabled on tenant-scoped models. ' +
+      'Use countDocuments() instead, or wrap in runUnscoped() with a valid reason.'
+    );
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // d) aggregate — inject $match as first stage (unless $geoNear)
+  // ──────────────────────────────────────────────────────────────
+  schema.pre('aggregate', async function () {
+    if (isUnscoped()) {
+      return;
+    }
+    const tenantId = getTenantId();
+    const pipeline = this.pipeline();
+    injectAggregateMatch(pipeline, tenantId);
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // e) WRITES of new documents — save, create, insertMany
+  // ──────────────────────────────────────────────────────────────
+  // Stamp tenantId BEFORE validation. Mongoose runs `required` checks
+  // during validation, which happens before pre('save'). If we only set
+  // tenantId in pre('save'), a required tenantId would fail first.
+  schema.pre('validate', async function () {
+    if (isUnscoped() || !this.isNew) {
+      return;
+    }
+    const tenantId = getTenantId();
+    if (this.tenantId && !this.tenantId.equals(tenantId)) {
+      throw new Error(
+        `Document tenantId (${this.tenantId}) does not match current context (${tenantId}). ` +
+        'Cannot create a document for a different tenant.'
+      );
+    }
+    this.tenantId = tenantId;
+  });
+
+  schema.pre('save', async function () {
+    if (isUnscoped()) {
+      return;
+    }
+    const tenantId = getTenantId();
+
+    if (this.isNew) {
+      // New document — stamp tenantId
+      if (this.tenantId && !this.tenantId.equals(tenantId)) {
+        throw new Error(
+          `Document tenantId (${this.tenantId}) does not match current context (${tenantId}). ` +
+          'Cannot create a document for a different tenant.'
+        );
+      }
+      this.tenantId = tenantId;
+    } else {
+      // Existing document — ensure tenantId is not being changed
+      if (this.isModified('tenantId')) {
+        throw new Error('Changing tenantId is not allowed. A document can never move between tenants.');
+      }
+    }
+  });
+
+  // create() goes through save() internally for each doc, so the pre('save') hook handles it.
+  // insertMany() requires explicit tenantId in the documents passed to it.
+
+  // ──────────────────────────────────────────────────────────────
+  // f) Block tenantId changes on updates — pre hooks for update methods
+  // ──────────────────────────────────────────────────────────────
+  const updateMethods = ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace'];
+  for (const method of updateMethods) {
+    schema.pre(method, async function () {
+      if (isUnscoped()) {
+        return;
+      }
+      // For query middleware, update document is in this._update
+      const update = this.getUpdate();
+      assertNoTenantIdChange(update);
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // g) bulkWrite — not supported on scoped models
+  // ──────────────────────────────────────────────────────────────
+  // bulkWrite takes an array of arbitrary operations (insertOne, updateOne,
+  // deleteOne, replaceOne) each with their own filter/update documents.
+  // Intercepting and rewriting every operation's filter/update safely is
+  // complex and error-prone. Instead, we throw a clear error directing
+  // the developer to use runUnscoped() with an explicit reason if they
+  // truly need bulkWrite (rare — usually for migrations or seeding).
+  schema.pre('bulkWrite', async function () {
+    if (isUnscoped()) {
+      return;
+    }
+    throw new Error(
+      'bulkWrite() is not supported on tenant-scoped models. ' +
+      'It accepts arbitrary operations that cannot be safely auto-scoped. ' +
+      'Use runUnscoped(reason, callback) with a valid justification if absolutely necessary.'
+    );
+  });
+}
+
+export default tenantPlugin;
+</code></pre>
+
+        <h3>Explanation of <code>tenantPlugin.js</code> (hook by hook):</h3>
+
+        <h4>a) Add <code>tenantId</code> field</h4>
+        <ul>
+            <li><b>Code:</b> <code>if (!schema.path('tenantId')) { schema.add({ tenantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tenant', required: true, index: true, }, }); }</code></li>
+            <li><b>Explanation:</b> This ensures that every schema where the <code>tenantPlugin</code> is applied automatically gets a <code>tenantId</code> field. It's a required field, indexed for performance, and references the <code>Tenant</code> model.</li>
+        </ul>
+
+        <h4>b) Query Methods (<code>find</code>, <code>findOne</code>, <code>updateOne</code>, <code>deleteOne</code>, etc.)</h4>
+        <ul>
+            <li><b>Code:</b> <code>for (const method of READ_METHODS) { schema.pre(method, async function () { ... }); }</code></li>
+            <li><b>Explanation:</b> For every read and write method listed in <code>READ_METHODS</code>, a <code>pre</code> hook is registered. This hook runs before the actual database operation.</li>
+            <li><code>getFilter()</code>: Inside the hook, <code>this.getFilter()</code> retrieves the current query filter.</li>
+            <li><b>Force-overwrite caller's <code>tenantId</code>:</b> The <code>applyTenantFilter</code> function is called, which gets the <code>tenantId</code> from the current context using <code>getTenantId()</code>. It then force-sets the <code>tenantId</code> in the query filter to ensure all operations are scoped to the current tenant.</li>
+            <li><b>Mismatch matching empty array <code>{ _id: { $in: [] } }</code>:</b> If the incoming query explicitly specified a <em>different</em> <code>tenantId</code> than the one in the current context, instead of overwriting it (which could lead to widening the query to all documents of the current tenant), the filter is modified to match nothing (<code>_id: { $in: [] }</code>). This makes the operation a safe no-op.</li>
+            <li><b>What happens when no tenant is in context:</b> If <code>getTenantId()</code> is called when no tenant is in context (i.e., outside of <code>runWithTenant</code> and not within <code>runUnscoped</code>), it throws an error. This is a critical safety measure to prevent accidental data leaks across tenants by making such an oversight loud and immediate.</li>
+        </ul>
+
+        <h4>c) <code>estimatedDocumentCount</code></h4>
+        <ul>
+            <li><b>Code:</b> <code>schema.pre('estimatedDocumentCount', async function () { ... });</code></li>
+            <li><b>Explanation:</b> This hook explicitly throws an error if <code>estimatedDocumentCount()</code> is called on a tenant-scoped model outside of an <code>runUnscoped</code> block. <code>estimatedDocumentCount</code> cannot be filtered by design, so allowing it would break tenant isolation. Developers are directed to use <code>countDocuments()</code> (which is tenant-scoped) or explicitly use <code>runUnscoped()</code> if they truly need an unscoped count.</li>
+        </ul>
+
+        <h4>d) Aggregation</h4>
+        <ul>
+            <li><b>Code:</b> <code>schema.pre('aggregate', async function () { ... });</code></li>
+            <li><b>Explanation:</b> For aggregation pipelines, a <code>pre('aggregate')</code> hook is used to inject a <code>$match</code> stage at the very beginning of the pipeline. This <code>$match</code> stage filters documents by the current <code>tenantId</code>.</li>
+            <li><b>Throwing on <code>$geoNear</code>:</b> If the pipeline starts with a <code>$geoNear</code> stage, the plugin throws an error. This is because <code>$geoNear</code> must be the first stage in an aggregation pipeline, and injecting <code>$match</code> before it would break its functionality. In such cases, developers must explicitly use <code>runUnscoped()</code>.</li>
+            <li><b><code>$lookup</code> and <code>$unionWith</code> limitations:</b> The documentation explicitly notes that <code>$lookup</code> and <code>$unionWith</code> operations, which join data from other collections, are <b>not automatically scoped</b> on their joined target collections. Developers must manually add <code>$match</code> stages within these operations to ensure tenant isolation for the joined data.</li>
+        </ul>
+
+        <h4>e) Writes of new documents (<code>save</code>, <code>create</code>, <code>insertMany</code>)</h4>
+        <ul>
+            <li><b><code>pre('validate')</code> hook:</b>
+                <ul>
+                    <li><b>Code:</b> <code>schema.pre('validate', async function () { ... });</code></li>
+                    <li><b>Explanation:</b> This hook runs before document validation. If a new document (<code>this.isNew</code>) is being created and it already has a <code>tenantId</code> that doesn't match the current context, it throws an error. Otherwise, it stamps the <code>tenantId</code> from the current context onto the new document. This is done here to ensure <code>tenantId</code> is present before Mongoose's `required` validation runs.</li>
+                </ul>
+            </li>
+            <li><b><code>pre('save')</code> hook:</b>
+                <ul>
+                    <li><b>Code:</b> <code>schema.pre('save', async function () { ... });</code></li>
+                    <li><b>Explanation:</b> For new documents, it re-verifies and stamps the <code>tenantId</code> if not already present, ensuring consistency. For existing documents, it checks if the <code>tenantId</code> field is being modified (<code>this.isModified('tenantId')</code>). If so, it throws an error, as a document can never change its tenant.</li>
+                </ul>
+            </li>
+        </ul>
+
+        <h4>f) Block <code>tenantId</code> changes on updates</h4>
+        <ul>
+            <li><b>Code:</b> <code>const updateMethods = [...]; for (const method of updateMethods) { schema.pre(method, async function () { ... }); }</code></li>
+            <li><b>Explanation:</b> For update operations (<code>updateOne</code>, <code>updateMany</code>, <code>findOneAndUpdate</code>, <code>replaceOne</code>, <code>findOneAndReplace</code>), a <code>pre</code> hook intercepts the update document. The <code>assertNoTenantIdChange</code> function is called to verify that the update operation is not attempting to modify (<code>$set</code>, <code>$unset</code>, or direct replacement) the <code>tenantId</code> field. This is crucial for maintaining data integrity and tenant isolation.</li>
+        </ul>
+
+        <h4>g) <code>bulkWrite</code></h4>
+        <ul>
+            <li><b>Code:</b> <code>schema.pre('bulkWrite', async function () { ... });</code></li>
+            <li><b>Explanation:</b> The <code>bulkWrite()</code> method allows for a complex array of operations, making safe automatic tenant scoping extremely difficult and error-prone. Therefore, this hook simply throws an error if <code>bulkWrite()</code> is called on a tenant-scoped model outside of an <code>runUnscoped</code> block. Developers are instructed to use <code>runUnscoped()</code> with a clear justification if they absolutely need to use <code>bulkWrite</code> (typically for system-level tasks).</li>
+        </ul>
+
+        <div class="prev-next-nav">
+          <a href="part-4a-important-code.html" id="prev-link">Previous: Part 4a</a>
+          <a href="part-4c-permissions.html" id="next-link">Next: Part 4c</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

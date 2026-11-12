@@ -1,32 +1,56 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Change Role & Deactivate Services</title>
-    <link rel="stylesheet" href="assets/style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4g: Change Role & Deactivate - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
 </head>
 <body>
-    <div class="topbar">
-        <a href="index.html">Home</a>
-    </div>
-    <div class="container">
-        <nav class="sidebar">
-            <ul>
-                <li><a href="part-4f-invite-service.html">Previous: Invite Service</a></li>
-                <li><strong>Change Role & Deactivate</strong></li>
-                <li><a href="part-4h-plan-limit.html">Next: Plan Limit</a></li>
-            </ul>
-        </nav>
-        <main>
-            <h1>Change Role & Deactivate Services</h1>
-            <p>Managing user status and permissions requires strict safety rules to prevent administrative lockouts or unauthorized privilege escalation.</p>
+  <div id="progress-bar"></div>
 
-            <h2>Core Logic</h2>
-            <p>Endpoints in <code>src/controllers/userController.js</code> handle user deactivation and role updates. These operations use a per-tenant mutex (<code>withTenantLock</code>) to serialize requests, ensuring that "last-admin" checks are race-condition safe.</p>
-            <pre><code class="language-javascript">// src/controllers/userController.js
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4g: Change Role & Deactivate (<code>userController.js</code>)</h1>
+
+        <p class="callout info">
+          <strong>What this covers:</strong> The <code>deactivate</code>, <code>reactivate</code>, and <code>changeRole</code> handlers in <code>src/controllers/userController.js</code>. These endpoints manage user status and permissions with strict safety rules to prevent lockouts and privilege escalation.
+        </p>
+
+        <h2>Overview</h2>
+        <p>Three endpoints exist under <code>PATCH /api/users/:id</code>:</p>
+        <ul>
+          <li><code>/deactivate</code> — sets <code>isActive = false</code> and wipes <code>refreshTokenHash</code></li>
+          <li><code>/reactivate</code> — sets <code>isActive = true</code> (idempotent)</li>
+          <li><code>/role</code> — changes a user's <code>roleId</code> and wipes <code>refreshTokenHash</code></li>
+        </ul>
+
+        <h2>Per-Tenant Mutex: <code>withTenantLock</code></h2>
+        <p>Because the "last admin" checks are <strong>read-then-write</strong> operations, two concurrent requests could both pass the check and leave the tenant with zero admins. <code>withTenantLock</code> serializes these operations per tenant using an in-process promise chain.</p>
+
+        <pre><code class="language-javascript">// src/controllers/userController.js (lines 44-71)
 
 const tenantLocks = new Map();
 
@@ -34,26 +58,248 @@ function withTenantLock(tenantId, task) {
   const key = String(tenantId);
   const previous = tenantLocks.get(key) || Promise.resolve();
   const run = previous.then(() => task());
-  // ... mutex implementation ...
+
+  // Keep the chain alive whether the task fulfilled or rejected
+  const tail = run.catch(() => {});
+  tenantLocks.set(key, tail);
+  tail.then(() => {
+    if (tenantLocks.get(key) === tail) tenantLocks.delete(key);
+  });
+
   return run;
 }</code></pre>
 
-            <h2>Security Rules</h2>
-            <ul>
-                <li><strong>Self-Protection:</strong> Users cannot deactivate or demote themselves.</li>
-                <li><strong>Privilege Gap Check:</strong> Users cannot assign a role with higher permissions than they currently hold, nor modify a user who holds permissions they lack.</li>
-                <li><strong>Last-Admin Rule:</strong> Deactivation or demotion of the last active admin (<code>USER_MANAGE</code>) is blocked with a <code>409</code> error.</li>
-            </ul>
+        <div class="callout warning">
+          <strong>Limitation:</strong> This only serializes requests within a single Node process. In a multi-instance deployment, replace with a distributed lock (Redis <code>SET NX</code> or MongoDB lease). The call sites stay the same.
+        </div>
 
-            <h2>Refresh Token Revocation</h2>
-            <p>On deactivation or role change, <code>refreshTokenHash</code> is set to <code>null</code>. This forces the user to log in again with their new effective permissions. While the existing access token (up to 15 minutes) remains valid, the user cannot acquire a new one.</p>
-            <pre><code class="language-javascript">// src/controllers/userController.js
+        <h2>Deactivate — <code>PATCH /api/users/:id/deactivate</code></h2>
+
+        <h3>Source</h3>
+        <pre><code class="language-javascript">// src/controllers/userController.js (lines 79-129)
+
+export const deactivate = asyncHandler(async (req, res) => {
+  const targetId = req.params.id;
+  const callerId = req.user.userId;
+
+  // Rule a: cannot deactivate yourself
+  if (targetId === callerId) {
+    throw new AppError('Forbidden', 403);
+  }
+
+  // tenantPlugin scopes this to the caller's tenant — another company's id → null → 404
+  const target = await User.findById(targetId);
+  if (!target) {
+    throw new AppError('User not found', 404);
+  }
+
+  // Rule c: privilege check — caller must have every permission the target's role has
+  const targetRole = await Role.findById(target.roleId).lean();
+  if (targetRole) {
+    const callerPerms = new Set(req.user.permissions);
+    const hasPrivilegeGap = targetRole.permissions.some((p) => !callerPerms.has(p));
+    if (hasPrivilegeGap) {
+      throw new AppError('Forbidden', 403);
+    }
+  }
+
+  // Rule b: cannot deactivate the last active user who holds USER_MANAGE
+  if (target.isActive) {
+    const adminRoles = await Role.find({ permissions: PERMISSIONS.USER_MANAGE }).lean();
+    const adminRoleIds = adminRoles.map((r) => r._id.toString());
+
+    const remainingAdminCount = await User.countDocuments({
+      _id: { $ne: target._id },
+      isActive: true,
+      roleId: { $in: adminRoleIds },
+    });
+
+    if (remainingAdminCount === 0 && adminRoleIds.includes(target.roleId.toString())) {
+      throw new AppError('Cannot deactivate the last admin', 409);
+    }
+  }
+
+  // All checks passed — deactivate and cut off future refresh token use
+  target.isActive = false;
+  target.refreshTokenHash = null;
+  await target.save();
+
+  res.status(200).json({ id: target._id, isActive: target.isActive });
+});</code></pre>
+
+        <h3>Rule Summary</h3>
+        <table>
+          <thead>
+            <tr><th>Rule</th><th>Check</th><th>Error</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Self-deactivation</td><td><code>targetId === callerId</code></td><td>403</td></tr>
+            <tr><td>Privilege gap</td><td>target role permissions ⊈ caller permissions</td><td>403</td></tr>
+            <tr><td>Last admin</td><td><code>countDocuments</code> excluding target, filtering <code>USER_MANAGE</code> roles</td><td>409</td></tr>
+          </tbody>
+        </table>
+
+        <h2>Reactivate — <code>PATCH /api/users/:id/reactivate</code></h2>
+
+        <p>Simple and idempotent — just flips <code>isActive</code> to <code>true</code>.</p>
+
+        <pre><code class="language-javascript">// src/controllers/userController.js (lines 136-149)
+
+export const reactivate = asyncHandler(async (req, res) => {
+  const targetId = req.params.id;
+
+  const target = await User.findById(targetId);
+  if (!target) {
+    throw new AppError('User not found', 404);
+  }
+
+  target.isActive = true;
+  await target.save();
+
+  res.status(200).json({ id: target._id, isActive: target.isActive });
+});</code></pre>
+
+        <h2>Change Role — <code>PATCH /api/users/:id/role</code></h2>
+
+        <h3>Source</h3>
+        <pre><code class="language-javascript">// src/controllers/userController.js (lines 168-256)
+
+export const changeRole = asyncHandler(async (req, res) => {
+  const targetId = req.params.id;
+  const { roleId } = req.body;
+  const callerId = req.user.userId;
+
+  // Validate roleId is a well-formed ObjectId
+  if (!mongoose.Types.ObjectId.isValid(roleId)) {
+    throw new AppError('Invalid role id', 400);
+  }
+
+  // Rule a: cannot change your own role
+  if (targetId === callerId) {
+    throw new AppError('Forbidden', 403);
+  }
+
+  // Serialize the check + write per tenant
+  return withTenantLock(req.user.tenantId, async () => {
+    const target = await User.findById(targetId).populate('roleId');
+    if (!target) {
+      throw new AppError('User not found', 404);
+    }
+
+    const newRole = await Role.findById(roleId).lean();
+    if (!newRole) {
+      throw new AppError('Role not found', 404);
+    }
+
+    // Rule e: already has that role → idempotent success
+    if (target.roleId._id.toString() === roleId) {
+      return res.status(200).json({
+        id: target._id,
+        roleId: target.roleId._id,
+        roleName: target.roleId.name,
+      });
+    }
+
+    const callerPerms = new Set(req.user.permissions);
+
+    // Rule b: privilege check on NEW role — cannot assign permissions you don't have
+    const hasEscalationInNewRole = newRole.permissions.some((p) => !callerPerms.has(p));
+    if (hasEscalationInNewRole) {
+      throw new AppError('Forbidden', 403);
+    }
+
+    // Rule c: privilege check on CURRENT role — cannot change someone with more permissions
+    const currentRole = target.roleId;
+    const hasPrivilegeGapInCurrentRole = currentRole.permissions.some((p) => !callerPerms.has(p));
+    if (hasPrivilegeGapInCurrentRole) {
+      throw new AppError('Forbidden', 403);
+    }
+
+    // Rule d: last-admin check — only if target IS an admin and we're demoting
+    const targetCurrentlyHasUserManage = currentRole.permissions.includes(PERMISSIONS.USER_MANAGE);
+    const newRoleHasUserManage = newRole.permissions.includes(PERMISSIONS.USER_MANAGE);
+
+    if (targetCurrentlyHasUserManage && !newRoleHasUserManage && target.isActive) {
+      const adminRoles = await Role.find({ permissions: PERMISSIONS.USER_MANAGE }).lean();
+      const adminRoleIds = adminRoles.map((r) => r._id.toString());
+
+      const remainingAdminCount = await User.countDocuments({
+        _id: { $ne: target._id },
+        isActive: true,
+        roleId: { $in: adminRoleIds },
+      });
+
+      if (remainingAdminCount === 0) {
+        throw new AppError('Cannot demote the last admin', 409);
+      }
+    }
+
+    // All checks passed — update role and wipe refresh token
+    target.roleId = roleId;
+    target.refreshTokenHash = null; // forces re-login to get new permissions
+    await target.save();
+
+    // Re-fetch to get the new role's name for the response
+    const updatedUser = await User.findById(targetId).populate('roleId');
+
+    res.status(200).json({
+      id: updatedUser._id,
+      roleId: updatedUser.roleId._id,
+      roleName: updatedUser.roleId.name,
+    });
+  });
+});</code></pre>
+
+        <h3>Rule Summary</h3>
+        <table>
+          <thead>
+            <tr><th>Rule</th><th>Check</th><th>Error</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>a) Self-promotion</td><td><code>targetId === callerId</code></td><td>403</td></tr>
+            <tr><td>b) Escalation in new role</td><td>newRole permissions ⊈ caller permissions</td><td>403</td></tr>
+            <tr><td>c) Demotion attack</td><td>currentRole permissions ⊈ caller permissions</td><td>403</td></tr>
+            <tr><td>d) Last admin</td><td>target has USER_MANAGE, new role doesn't, no other active admins</td><td>409</td></tr>
+            <tr><td>e) Idempotent</td><td>target.roleId === roleId</td><td>200</td></tr>
+          </tbody>
+        </table>
+
+        <h2>Refresh Token Wipe</h2>
+        <p>Both <code>deactivate</code> and <code>changeRole</code> set <code>refreshTokenHash = null</code>. This means:</p>
+        <ul>
+          <li>The user's <strong>access token remains valid</strong> for up to 15 minutes (stateless JWT, no DB check on every request)</li>
+          <li>The user <strong>cannot obtain a new access token</strong> after that — the refresh token is dead</li>
+          <li>This is a deliberate trade-off: near-instant cutoff would require a Redis blocklist checked on every request</li>
+        </ul>
+
+        <pre><code class="language-javascript">// src/controllers/userController.js (lines 124-126, 243-245)
 
 target.isActive = false;
 target.refreshTokenHash = null;
+await target.save();
+
+// ...
+
+target.roleId = roleId;
+target.refreshTokenHash = null; // forces re-login to get new permissions
 await target.save();</code></pre>
-        </main>
-    </div>
-    <script>hljs.highlightAll();</script>
+
+        <div class="callout info">
+          <strong>Ponytail note (from source):</strong> Access tokens are still valid up to 15 min post-deactivation; add a token revocation list (e.g. Redis blocklist) if near-instant cutoff is required.
+        </div>
+
+        <nav class="prev-next-nav">
+          <a href="part-4f-invite-service.html" id="prev-link">Previous: Part 4f</a>
+          <a href="part-4h-plan-limit.html" id="next-link">Next: Part 4h</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">
+    Built from the actual Multi-Tenant SaaS codebase
+  </footer>
+
+  <script src="assets/app.js"></script>
 </body>
 </html>

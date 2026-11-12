@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 5: Request Flows - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 5: Request Flows — Interactive Journey Stepper</h1>
+        <p class="badge built">BUILT</p>
+
+        <p>This page traces three real request scenarios through the actual codebase. Each step shows the exact file, function, and code that runs. Click a scenario tab to follow it end-to-end.</p>
+
+        <div class="stepper-tabs">
+          <button class="stepper-tab active" data-tab="scenario-1">Scenario 1: Viewer tries to delete a project</button>
+          <button class="stepper-tab" data-tab="scenario-2">Scenario 2: Company B uses Company A's project ID</button>
+          <button class="stepper-tab" data-tab="scenario-3">Scenario 3: Stripe sends duplicate webhook event (PLANNED)</button>
+        </div>
+
+        <div class="stepper-container" id="stepper-container">
+          <!-- Steps injected by JS -->
+        </div>
+
+        <div class="prev-next-nav">
+          <a href="part-4j-tests-summary.html" id="prev-link">Previous: Part 4j</a>
+          <a href="part-6-how-it-breaks.html" id="next-link">Next: Part 6</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+  <script src="assets/app.js"></script>
+  <script>
+    // Scenario step data
+    const scenarios = {
+      'scenario-1': {
+        title: 'Viewer tries to delete a project (HTTP 403)',
+        description: 'A user with role "member" (permissions: project:read, task:create, task:read, task:update) attempts DELETE /api/projects/:id. The requirePermission middleware rejects it before the controller runs.',
+        steps: [
+          {
+            step: 1,
+            title: 'HTTP Request arrives',
+            file: 'src/routes/projectRoutes.js',
+            description: 'DELETE /api/projects/66b8c3... — The Express router receives the request. Middleware chain: protect → requirePermission(PROJECT_DELETE) → validateProjectId → projectController.remove',
+            code: `router.delete(
+  '/:id',
+  protect,
+  requirePermission(PERMISSIONS.PROJECT_DELETE),
+  validateProjectId,
+  projectController.remove
+);`
+          },
+          {
+            step: 2,
+            title: 'protect.js — JWT verification',
+            file: 'src/middleware/protect.js',
+            description: 'Extracts "Bearer <token>" from Authorization header, verifies signature + expiry using ACCESS secret. Builds req.user from token payload (NO database call). Runs downstream inside runWithTenant().',
+            code: `const protect = async (req, _res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new AppError('Unauthorized', 401);
+  }
+  const token = authHeader.split(' ')[1];
+
+  let decoded;
+  try {
+    decoded = verifyAccessToken(token); // jwt.verify with ACCESS secret
+  } catch {
+    throw new AppError('Unauthorized', 401);
+  }
+
+  req.user = {
+    userId: decoded.userId,
+    tenantId: decoded.tenantId,
+    roleId: decoded.roleId,
+    permissions: decoded.permissions || [], // e.g. ["project:read", "task:create", ...]
+  };
+
+  // Establish AsyncLocalStorage tenant context
+  runWithTenant(
+    { tenantId: decoded.tenantId, userId: decoded.userId },
+    () => next()
+  );
+};`
+          },
+          {
+            step: 3,
+            title: 'tenantContext.js — AsyncLocalStorage context set',
+            file: 'src/utils/tenantContext.js',
+            description: 'runWithTenant() stores { tenantId, userId } in AsyncLocalStorage. Any downstream code (including Mongoose plugin) can call getTenantId() to read it without passing req through every layer.',
+            code: `export function runWithTenant(context, callback) {
+  return asyncLocalStorage.run(context, callback);
+}
+
+export function getTenantId() {
+  if (unscopedDepth > 0) return undefined; // inside runUnscoped
+  const store = asyncLocalStorage.getStore();
+  if (!store?.tenantId) {
+    throw new Error('getTenantId() called outside a tenant context...');
+  }
+  return store.tenantId;
+}`
+          },
+          {
+            step: 4,
+            title: 'requirePermission.js — Permission check',
+            file: 'src/middleware/requirePermission.js',
+            description: 'Checks if req.user.permissions includes PROJECT_DELETE. The viewer\'s token has ["project:read", "task:create", "task:read", "task:update"] — missing PROJECT_DELETE → returns 403 Forbidden.',
+            code: `const requirePermission = (...keys) => {
+  validateKeys(keys); // throws at startup if unknown key
+  return (req, _res, next) => {
+    if (!req.user) return next(new AppError('Unauthorized', 401));
+    const missing = keys.filter(key => !req.user.permissions.includes(key));
+    if (missing.length > 0) {
+      return next(new AppError('Forbidden', 403)); // ← VIEWER REJECTED HERE
+    }
+    next();
+  };
+};
+
+// Usage in route:
+requirePermission(PERMISSIONS.PROJECT_DELETE) // 'project:delete'
+`
+          },
+          {
+            step: 5,
+            title: 'Error handler — 403 response',
+            file: 'src/middleware/errorHandler.js',
+            description: 'Central error handler catches AppError with statusCode 403 and returns JSON. Controller never runs.',
+            code: `// Response:
+{
+  "status": "error",
+  "message": "Forbidden"
+}`
+          }
+        ]
+      },
+      'scenario-2': {
+        title: 'Company B uses Company A\'s project ID (HTTP 404)',
+        description: 'An authenticated admin from Company B sends DELETE /api/projects/<companyA-project-id>. The tenant plugin scopes the query to Company B, findById returns null, controller throws 404.',
+        steps: [
+          {
+            step: 1,
+            title: 'HTTP Request arrives',
+            file: 'src/routes/projectRoutes.js',
+            description: 'DELETE /api/projects/66b8c3... (Company A\'s project ID). Company B admin has PROJECT_DELETE permission, so requirePermission passes. validateProjectId passes (valid ObjectId). Controller runs.',
+            code: `router.delete(
+  '/:id',
+  protect,
+  requirePermission(PERMISSIONS.PROJECT_DELETE), // Company B admin HAS this
+  validateProjectId,
+  projectController.remove
+);`
+          },
+          {
+            step: 2,
+            title: 'protect.js — JWT verification (Company B)',
+            file: 'src/middleware/protect.js',
+            description: 'Token belongs to Company B admin. req.user = { userId: B-admin, tenantId: companyB, roleId: admin, permissions: [...ALL_PERMISSIONS] }. runWithTenant({ tenantId: companyB, userId: B-admin }) called.',
+            code: `req.user = {
+  userId: decoded.userId,      // Company B admin
+  tenantId: decoded.tenantId,  // Company B
+  roleId: decoded.roleId,      // admin role
+  permissions: decoded.permissions || [], // ALL_PERMISSIONS
+};
+
+runWithTenant(
+  { tenantId: decoded.tenantId, userId: decoded.userId },
+  () => next()
+);`
+          },
+          {
+            step: 3,
+            title: 'tenantContext.js — Company B context active',
+            file: 'src/utils/tenantContext.js',
+            description: 'AsyncLocalStorage now holds { tenantId: companyB, userId: B-admin }. getTenantId() returns companyB for this request.',
+            code: `// Inside this request, any call to:
+getTenantId() // returns companyB (ObjectId)`
+          },
+          {
+            step: 4,
+            title: 'projectController.remove → projectService.deleteProject',
+            file: 'src/services/projectService.js',
+            description: 'Controller calls service with project ID from params. Service calls Project.findById(id).',
+            code: `export async function deleteProject({ id, actorId }) {
+  const project = await Project.findById(id); // ← TENANT PLUGIN INTERCEPTS THIS
+  if (!project) {
+    throw new AppError('Project not found', 404);
+  }
+  // ...`
+          },
+          {
+            step: 5,
+            title: 'tenantPlugin.js — Automatic tenant filter injected',
+            file: 'src/plugins/tenantPlugin.js',
+            description: 'pre(findById) hook runs. getTenantId() returns companyB. Plugin rewrites filter: { _id: companyA-project-id } → { _id: companyA-project-id, tenantId: companyB }. Since no document matches BOTH, findById returns null.',
+            code: `schema.pre('findById', async function () {
+  if (isUnscoped()) return;
+  const tenantId = getTenantId(); // companyB
+
+  if (typeof this.getFilter === 'function') {
+    const filter = this.getFilter(); // { _id: companyA-project-id }
+    applyTenantFilter(filter, tenantId);
+    // filter becomes: { _id: companyA-project-id, tenantId: companyB }
+    // → matches NOTHING
+  }
+});
+
+function applyTenantFilter(filter, tenantId) {
+  // Force-overwrite tenantId to current context
+  filter.tenantId = tenantId;
+}`
+          },
+          {
+            step: 6,
+            title: 'Controller throws 404 — Company B never sees Company A data',
+            file: 'src/services/projectService.js',
+            description: 'Project.findById returns null → service throws AppError("Project not found", 404). Error handler returns 404. Company B admin gets 404, never 403 — no information leak about whether the ID exists in another tenant.',
+            code: `const project = await Project.findById(id); // returns null
+if (!project) {
+  throw new AppError('Project not found', 404); // ← 404, NOT 403
+}
+
+// Response:
+{
+  "status": "error",
+  "message": "Project not found"
+}`
+          }
+        ]
+      },
+      'scenario-3': {
+        title: 'Stripe sends duplicate webhook event (PLANNED)',
+        description: 'Stripe retries a checkout.session.completed event. The webhook handler verifies signature, then uses Redis SET NX EX to claim the event ID. Duplicate returns 200 immediately without processing.',
+        steps: [
+          {
+            step: 1,
+            title: 'Raw HTTP request from Stripe',
+            file: 'src/routes/webhookRoutes.js (PLANNED)',
+            description: 'POST /api/webhooks/stripe. Must use raw body parser (express.raw) because Stripe signature is computed over the exact byte payload. Headers: Stripe-Signature, Stripe-Event-Type.',
+            code: `// app.js — raw body parser for webhook route ONLY
+app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+// webhookRoutes.js
+router.post('/stripe', stripeWebhookController.handle);`
+          },
+          {
+            step: 2,
+            title: 'Verify Stripe signature',
+            file: 'src/services/stripeService.js (PLANNED)',
+            description: 'Uses Stripe\'s official library to verify the webhook secret against the raw body + Stripe-Signature header. Throws if invalid or timestamp too old (replay protection).',
+            code: `import Stripe from 'stripe';
+const stripe = new Stripe(env.stripe.secretKey);
+
+export function verifyWebhookSignature(rawBody, signatureHeader) {
+  try {
+    return stripe.webhooks.constructEvent(
+      rawBody,
+      signatureHeader,
+      env.stripe.webhookSecret
+    );
+  } catch (err) {
+    throw new AppError('Invalid Stripe signature', 400);
+  }
+}`
+          },
+          {
+            step: 3,
+            title: 'Redis idempotency key claim — SET NX EX',
+            file: 'src/services/stripeService.js (PLANNED)',
+            description: 'Event object has unique id (evt_...). Use Redis SET key NX EX 86400 (24h TTL). If SET succeeds (key was not set), we own this event. If SET fails (key exists), it\'s a duplicate — return 200 immediately.',
+            code: `import { getRedis } from '../config/redis.js';
+
+export async function claimStripeEvent(eventId) {
+  const redis = getRedis();
+  const key = \`stripe:event:\${eventId}\`;
+  // SET key "1" NX EX 86400 → returns "OK" if claimed, null if already exists
+  const claimed = await redis.set(key, '1', 'NX', 'EX', 86400);
+  return claimed === 'OK'; // true = first time, false = duplicate
+}
+
+// In handler:
+const event = verifyWebhookSignature(rawBody, sigHeader);
+const isFirst = await claimStripeEvent(event.id);
+if (!isFirst) {
+  console.log('Duplicate Stripe event ignored:', event.id);
+  return { status: 'duplicate', eventId: event.id }; // 200 OK
+}`
+          },
+          {
+            step: 4,
+            title: 'Process event (first time only)',
+            file: 'src/controllers/stripeWebhookController.js (PLANNED)',
+            description: 'Switch on event.type. For checkout.session.completed: extract tenantId from metadata, upgrade plan in Tenant collection, log activity. Wrap in try/catch so webhook always returns 2xx to Stripe (otherwise they retry forever).',
+            code: `export async function handleStripeWebhook(req, res) {
+  const event = verifyWebhookSignature(req.body, req.headers['stripe-signature']);
+  const isFirst = await claimStripeEvent(event.id);
+  if (!isFirst) return res.json({ status: 'duplicate' });
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        const tenantId = session.metadata?.tenantId;
+        if (!tenantId) throw new Error('Missing tenantId in metadata');
+
+        await Tenant.findByIdAndUpdate(tenantId, { plan: 'pro' });
+        await logActivity({ actorId: 'stripe', action: 'plan.upgraded', entityType: 'tenant', entityId: tenantId });
+        break;
+      }
+      // ... other event types
+    }
+    res.json({ received: true });
+  } catch (err) {
+    // Log but still return 2xx so Stripe stops retrying
+    logger.error({ err, eventId: event.id }, 'Webhook processing failed');
+    res.json({ received: true, error: 'logged' });
+  }
+}`
+          },
+          {
+            step: 5,
+            title: 'StripeEvent model — audit trail (PLANNED)',
+            file: 'src/models/StripeEvent.js (PLANNED)',
+            description: 'Store every processed event for debugging/reconciliation. Unique index on eventId prevents double-insert even if Redis fails.',
+            code: `import mongoose from 'mongoose';
+
+const stripeEventSchema = new mongoose.Schema({
+  eventId: { type: String, required: true, unique: true }, // evt_...
+  type: { type: String, required: true },
+  processedAt: { type: Date, default: Date.now },
+  payload: { type: mongoose.Schema.Types.Mixed },
+});
+
+stripeEventSchema.index({ eventId: 1 }, { unique: true });
+// Note: NO tenantPlugin — webhook runs unscoped (system-level)
+export default mongoose.model('StripeEvent', stripeEventSchema);`
+          }
+        ]
+      }
+    };
+
+    // Render stepper for a scenario
+    function renderScenario(scenarioId) {
+      const scenario = scenarios[scenarioId];
+      const container = document.getElementById('stepper-container');
+
+      let html = `
+        <div class="scenario-header">
+          <h2>${scenario.title}</h2>
+          <p>${scenario.description}</p>
+        </div>
+        <div class="stepper-steps">
+      `;
+
+      scenario.steps.forEach((step, idx) => {
+        html += `
+          <div class="stepper-step" data-step="${idx + 1}">
+            <div class="step-number">${idx + 1}</div>
+            <div class="step-content">
+              <h3>${step.title}</h3>
+              <p class="step-file"><strong>File:</strong> <code>${step.file}</code></p>
+              <p>${step.description}</p>
+              <div class="code-block-header">
+                <span>${step.file.split('/').pop()}</span>
+                <button class="copy-button">Copy</button>
+              </div>
+              <pre><code class="language-javascript">${escapeHtml(step.code)}</code></pre>
+            </div>
+          </div>
+        `;
+      });
+
+      html += '</div>';
+      container.innerHTML = html;
+      hljs.highlightAll();
+      initCopyButtons();
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function initCopyButtons() {
+      document.querySelectorAll('.copy-button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const pre = btn.closest('.code-block-header').nextElementSibling;
+          const code = pre ? pre.querySelector('code') : null;
+          const text = code ? code.textContent : pre.textContent;
+          navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = 'Copied';
+            setTimeout(() => btn.textContent = 'Copy', 1500);
+          });
+        });
+      });
+    }
+
+    // Tab switching
+    document.querySelectorAll('.stepper-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.stepper-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        renderScenario(tab.dataset.tab);
+      });
+    });
+
+    // Initial render
+    document.addEventListener('DOMContentLoaded', () => {
+      renderScenario('scenario-1');
+    });
+  </script>
+</body>
+</html>
