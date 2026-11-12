@@ -1,43 +1,177 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stripe Webhook (Planned)</title>
-    <link rel="stylesheet" href="assets/style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4i: Stripe Webhook (Planned) - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
 </head>
 <body>
-    <div class="topbar">
-        <a href="index.html">Home</a>
-    </div>
-    <div class="container">
-        <nav class="sidebar">
-            <ul>
-                <li><a href="part-4h-plan-limit.html">Previous: Plan Limit</a></li>
-                <li><strong>Stripe Webhook</strong></li>
-                <li><a href="part-4j-tests-summary.html">Next: Tests Summary</a></li>
-            </ul>
-        </nav>
-        <main>
-            <h1>Stripe Webhook <span class="badge planned">PLANNED</span></h1>
-            <p>This feature is designed but not yet built in the repository. It will handle real-time plan lifecycle events from Stripe.</p>
+  <div id="progress-bar"></div>
 
-            <h2>Architecture</h2>
-            <p>The webhook endpoint will require the raw request body for signature verification. This is achieved via <code>express.raw({ type: 'application/json' })}</code> middleware, preventing downstream JSON parsing that could break signature checks.</p>
-            <pre><code class="language-javascript">// Planned implementation
-const sig = req.headers['stripe-signature'];
-const event = stripe.webhooks.constructEvent(
-  req.body, // raw Buffer
-  sig,
-  process.env.STRIPE_WEBHOOK_SECRET
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4i: Stripe Webhook <span class="badge planned">PLANNED</span></h1>
+
+        <p class="callout warning">
+          <strong>Status:</strong> Designed, not built. No implementation exists in the repository yet. This page documents the planned architecture so the design is captured before implementation.
+        </p>
+
+        <h2>Webhook Endpoint Design</h2>
+        <p>Stripe requires the <strong>raw request body</strong> for signature verification. Standard <code>express.json()</code> middleware parses the body, which breaks signature verification. The endpoint must use <code>express.raw({ type: 'application/json' })</code> instead.</p>
+
+        <h3>Signature Verification</h3>
+        <pre><code class="language-javascript">// Planned — not yet implemented
+
+app.post(
+  '/api/webhooks/stripe',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,                    // raw Buffer, NOT parsed JSON
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Handle event types...
+  }
 );</code></pre>
 
-            <h2>Idempotency</h2>
-            <p>To prevent duplicate processing of the same event, we will use a Redis claim pattern: <code>SET key NX EX</code> to atomically claim the event ID, releasing it on error. A fallback <code>StripeEvent</code> collection with a unique index on <code>eventId</code> provides persistence.</p>
-        </main>
-    </div>
-    <script>hljs.highlightAll();</script>
+        <h2>Idempotency Design</h2>
+        <p>Stripe may deliver the same event multiple times. We must process each event <strong>exactly once</strong>.</p>
+
+        <h3>Primary: Redis Claim Pattern</h3>
+        <p>On receipt, atomically claim the event ID using <code>SET key NX EX</code>. If the claim fails, the event was already processed.</p>
+
+        <pre><code class="language-javascript">// Planned — not yet implemented
+
+const eventId = event.id;
+const claimed = await redis.set(
+  `stripe:event:${eventId}`,
+  'processing',
+  'NX',    // only set if not exists
+  'EX', 86400 // 24h TTL
+);
+
+if (!claimed) {
+  // Already processed (or being processed) — acknowledge to Stripe
+  return res.json({ received: true });
+}
+
+try {
+  await handleStripeEvent(event);
+  await redis.set(`stripe:event:${eventId}`, 'done', 'EX', 86400);
+  res.json({ received: true });
+} catch (err) {
+  // Release claim on error so a retry can pick it up
+  await redis.del(`stripe:event:${eventId}`);
+  throw err;
+}</code></pre>
+
+        <h3>Fallback: <code>StripeEvent</code> Collection</h3>
+        <p>If Redis is unavailable, a MongoDB collection with a <strong>unique index on <code>eventId</code></strong> provides durability:</p>
+
+        <pre><code class="language-javascript">// Planned — not yet implemented
+
+import mongoose from 'mongoose';
+
+const stripeEventSchema = new mongoose.Schema({
+  eventId: { type: String, required: true, unique: true },
+  type: String,
+  payload: mongoose.Schema.Types.Mixed,
+  status: { type: String, enum: ['pending', 'done', 'failed'], default: 'pending' },
+  createdAt: { type: Date, default: Date.now },
+});
+
+export const StripeEvent = mongoose.model('StripeEvent', stripeEventSchema);
+
+// In handler:
+try {
+  await StripeEvent.create({ eventId, type: event.type, payload: event.data.object });
+  await handleStripeEvent(event);
+  await StripeEvent.updateOne({ eventId }, { status: 'done' });
+} catch (err) {
+  if (err.code === 11000) {
+    // Duplicate key — already processed
+    return res.json({ received: true });
+  }
+  await StripeEvent.updateOne({ eventId }, { status: 'failed' });
+  throw err;
+}</code></pre>
+
+        <h2>Event Types to Handle</h2>
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>customer.subscription.created</code></td><td>Upgrade tenant plan, reset projectCount if needed</td></tr>
+            <tr><td><code>customer.subscription.updated</code></td><td>Sync plan changes (upgrade/downgrade/cancel)</td></tr>
+            <tr><td><code>customer.subscription.deleted</code></td><td>Downgrade to Free, enforce limits on next create</td></tr>
+            <tr><td><code>invoice.payment_failed</code></td><td>Mark tenant past_due, maybe restrict features</td></tr>
+          </tbody>
+        </table>
+
+        <h2>Plan Sync Logic</h2>
+        <p>On plan change events, update the Tenant's <code>plan</code> field. The next <code>reserveProjectSlot</code> call will read the new plan automatically (see <a href="part-4h-plan-limit.html">Part 4h</a>).</p>
+
+        <pre><code class="language-javascript">// Planned — not yet implemented
+
+async function syncTenantPlanFromStripe(customerId, newPlan) {
+  // Map Stripe price ID → internal plan name (free, pro, etc.)
+  const plan = mapStripePriceToPlan(newPlan);
+
+  await Tenant.findOneAndUpdate(
+    { stripeCustomerId: customerId },
+    { $set: { plan } }
+  );
+}</code></pre>
+
+        <div class="callout info">
+          <strong>No fake code:</strong> This page intentionally contains no real implementation from the repo because the feature doesn't exist yet. The design above will guide the implementation when it's built.
+        </div>
+
+        <nav class="prev-next-nav">
+          <a href="part-4h-plan-limit.html" id="prev-link">Previous: Part 4h</a>
+          <a href="part-4j-tests-summary.html" id="next-link">Next: Part 4j</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">
+    Built from the actual Multi-Tenant SaaS codebase
+  </footer>
+
+  <script src="assets/app.js"></script>
 </body>
 </html>

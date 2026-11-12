@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 7: Testing Strategy - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 7: Testing Strategy</h1>
+
+        <p class="callout info">
+          <strong>What this covers:</strong> Every test file in <code>tests/</code> with a one-line explanation of what it proves, why isolation tests use TWO real companies against real in-memory MongoDB (not mocks), and what is explicitly NOT tested.
+        </p>
+
+        <h2>Test File Inventory</h2>
+
+        <table>
+          <thead>
+            <tr><th>File</th><th>What It Proves</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>health.test.js</code></td>
+              <td>Express app boots & <code>/health</code> returns <code>{ status: 'ok' }</code></td>
+            </tr>
+            <tr>
+              <td><code>auth.test.js</code></td>
+              <td>Signup, login, JWT claims shape, timing attack protection (same error for wrong email/password/companySlug)</td>
+            </tr>
+            <tr>
+              <td><code>authMiddleware.test.js</code></td>
+              <td><code>protect</code> middleware: valid token → 200 with context; missing/malformed/expired/tampered tokens → 401; refresh token as access token → 401; tenantId in body/query ignored; 20+ concurrent requests with two companies never mix tenantIds</td>
+            </tr>
+            <tr>
+              <td><code>tenantIsolation.test.js</code></td>
+              <td>52+ unit & HTTP isolation assertions with 2 real companies against in-memory MongoDB: query scoping, overwrite prevention, cross-tenant isolation at unit & HTTP level, <code>runUnscoped</code> escape hatch, <code>estimatedDocumentCount</code>/<code>bulkWrite</code> blocking</td>
+            </tr>
+            <tr>
+              <td><code>rbac.test.js</code></td>
+              <td>Permission middleware, invite flow, role privilege rules, <code>requireAnyPermission</code>, cross-tenant token isolation at HTTP level</td>
+            </tr>
+            <tr>
+              <td><code>userDeactivate.test.js</code></td>
+              <td>Self-deactivation block (403), last-admin protection (409), refresh token wipe on deactivation, privilege escalation prevention, cross-tenant IDOR returns 404</td>
+            </tr>
+            <tr>
+              <td><code>changeRole.test.js</code></td>
+              <td>Self-role-change block, privilege escalation checks (both directions: assigning > caller perms, demoting > caller perms), last-admin demote block (409), concurrent demote race safety, idempotency, cross-tenant isolation, refresh token invalidation</td>
+            </tr>
+            <tr>
+              <td><code>projects.test.js</code></td>
+              <td>CRUD, pagination, archive filtering, task cascade delete, unknown field rejection (tenantId/createdBy), cross-tenant isolation</td>
+            </tr>
+            <tr>
+              <td><code>tasks.test.js</code></td>
+              <td>Task CRUD, status filtering, assignee tenant scoping (same company + active only, generic error), <code>/tasks/mine</code>, immutable fields (projectId/tenantId/createdBy), cross-tenant isolation</td>
+            </tr>
+            <tr>
+              <td><code>planLimit.test.js</code></td>
+              <td>Free plan 3-project cap, 4th create returns exact 402 payload, concurrent create race safety (Promise.all), archive/unarchive slot release, plan read from DB not JWT (upgrade without token refresh works)</td>
+            </tr>
+            <tr>
+              <td><code>activity.test.js</code></td>
+              <td>Append-only activity log for project/task CRUD, meta never contains passwords/tokens, <code>user:manage</code> gating, tenant-only scoping, newest-first pagination, failing log write does NOT fail main operation (swallowed error)</td>
+            </tr>
+            <tr>
+              <td><code>signupRateLimit.test.js</code></td>
+              <td>Signup rate limiter 5-req cap per IP per 15 min (separate test app with NO skip, unique slugs to avoid 409)</td>
+            </tr>
+            <tr>
+              <td><code>loginRateLimit.test.js</code></td>
+              <td>Login rate limiter 10-req cap per IP per 15 min (separate test app with NO skip, creates user via signup without limiter first)</td>
+            </tr>
+            <tr>
+              <td><code>refreshLogout.test.js</code></td>
+              <td>Token rotation (new refresh each time), reuse detection (old token → 401), safety wipe (reuse kills newest token too), token separation (separate secrets: access ≠ refresh), deactivated user refresh → 401, logout invalidates refresh, garbage token logout → 200</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Why Isolation Tests Use TWO Real Companies Against Real In-Memory MongoDB</h2>
+
+        <p class="callout info">
+          <strong>No mocks.</strong> <code>tests/tenantIsolation.test.js</code> creates two actual tenants (Company A and Company B) with real users, roles, and documents in <code>mongodb-memory-server</code>. Here's why:
+        </p>
+
+        <h3>1. Mocks Cannot Prove Isolation</h3>
+        <pre><code class="language-javascript">// MOCK APPROACH (what we DON'T do):
+jest.mock('../src/models/User');
+User.find.mockResolvedValue([{ tenantId: 'A' }]);
+// This only proves the mock returns what we told it to.
+// It proves NOTHING about the actual tenant plugin behavior.</code></pre>
+        <p>A mock returns exactly what you program it to return. It cannot catch bugs in the plugin's <code>applyTenantFilter</code> logic, the <code>$geoNear</code> error, the forced overwrite behavior, or the <code>runUnscoped</code> escape hatch.</p>
+
+        <h3>2. Real MongoDB Catches Real Bugs</h3>
+        <pre><code class="language-javascript">// tests/tenantIsolation.test.js (lines 111-117) — REAL test
+
+it('inside A context, findOne with explicit B tenantId filter returns null (forced overwrite)', async () => {
+  const user = await runWithTenant({ tenantId: tenantA._id }, async () =>
+    User.findOne({ tenantId: tenantB._id, email: 'bob@b.com' }).lean()
+  );
+  expect(user).toBeNull();
+});</code></pre>
+        <p>This test caught a real bug during development: the plugin was originally <em>rewriting</em> the filter instead of force-overwriting. The rewrite would turn <code>updateMany({ tenantId: B })</code> into <code>updateMany({ tenantId: A })</code> — matching ALL of Company A's documents. The forced overwrite (setting <code>_id: { $in: [] }</code>) makes the operation a no-op instead.</p>
+
+        <h3>3. <code>mongodb-memory-server</code> Is a Real MongoDB</h3>
+        <ul>
+          <li>Runs actual MongoDB binary in-memory (not a mock, not an approximation)</li>
+          <li>Supports transactions, indexes, aggregations, <code>$geoNear</code>, TTL indexes</li>
+          <li>Each test suite gets a fresh database via <code>clearTestDB()</code> in <code>beforeEach</code></li>
+          <li>No external dependency — runs in CI without a MongoDB server</li>
+        </ul>
+
+        <h3>4. The Test Helper Pattern</h3>
+        <pre><code class="language-javascript">// tests/tenantIsolation.test.js (lines 50-70)
+
+async function createTenant(name, slug) {
+  return runUnscoped(`test: create tenant ${name}`, () => Tenant.create({ name, slug }));
+}
+
+async function createRoleInContext(tenantId, name, permissions) {
+  return runWithTenant({ tenantId }, async () => Role.create({ name, permissions, isSystemRole: true }));
+}
+
+async function createUserInContext(tenantId, name, email, passwordHash, roleId) {
+  return runWithTenant({ tenantId }, async () => User.create({
+    name, email, passwordHash, roleId
+  }));
+}</code></pre>
+        <p><code>runWithTenant</code> and <code>runUnscoped</code> are the SAME functions used by the application. Tests exercise the exact same code paths.</p>
+
+        <h3>5. HTTP-Level Concurrency Test (20+ Mixed Requests)</h3>
+        <pre><code class="language-javascript">// tests/tenantIsolation.test.js (lines 459-509)
+
+it('20+ mixed concurrent requests to /api/me never mix tenant data', async () => {
+  const requests = [];
+
+  for (let i = 0; i < 10; i++) {
+    requests.push(request(app).get('/api/me').set('Authorization', `Bearer ${tokenA}`));
+  }
+  for (let i = 0; i < 10; i++) {
+    requests.push(request(app).get('/api/me').set('Authorization', `Bearer ${tokenB}`));
+  }
+
+  const responses = await Promise.all(requests);
+
+  // Verify all succeeded
+  responses.forEach(res => expect(res.status).toBe(200));
+
+  // Verify A's requests all see A's tenantId
+  const aResponses = responses.slice(0, 10);
+  aResponses.forEach(res => expect(res.body.data.tenantId).toBe(aTenantId));
+
+  // Verify B's requests all see B's tenantId
+  const bResponses = responses.slice(10, 20);
+  bResponses.forEach(res => expect(res.body.data.tenantId).toBe(bTenantId));
+
+  expect(aTenantId).not.toBe(bTenantId);
+  // Verify no mixing
+  aResponses.forEach(res => expect(res.body.data.tenantId).toBe(aTenantId));
+  bResponses.forEach(res => expect(res.body.data.tenantId).toBe(bTenantId));
+});</code></pre>
+        <p>This test runs the FULL HTTP stack: Express → <code>protect.js</code> → AsyncLocalStorage → <code>/api/me</code> handler. It proves the context doesn't leak between concurrent requests in the same event loop.</p>
+
+        <h2>What Is NOT Tested</h2>
+
+        <p class="callout warning">
+          The following behaviors are explicitly NOT covered by the test suite. They are known gaps.
+        </p>
+
+        <h3>1. Stripe Webhooks — PLANNED, Not Built</h3>
+        <ul>
+          <li>No webhook endpoint exists in the codebase</li>
+          <li>No signature verification tests</li>
+          <li>No idempotency tests (Redis <code>SET NX</code> or MongoDB unique index)</li>
+          <li>No plan sync tests (Tenant plan update from Stripe events)</li>
+        </ul>
+        <p>See <a href="part-4i-stripe-webhook.html">Part 4i</a> for the planned design.</p>
+
+        <h3>2. Raw MongoDB Driver Calls</h3>
+        <ul>
+          <li>No tests for <code>Model.collection.find()</code>, <code>Model.collection.insertOne()</code>, <code>mongoose.connection.db</code></li>
+          <li>These bypass the tenant plugin entirely (see <a href="part-6-how-it-breaks.html">Part 6, Gap #2</a>)</li>
+          <li>No test proves they are blocked or detected</li>
+        </ul>
+
+        <h3>3. Multi-Process Distributed Locks</h3>
+        <ul>
+          <li><code>withTenantLock</code> in <code>userController.js</code> is only tested in a single process</li>
+          <li>No test runs multiple Node processes behind a load balancer</li>
+          <li>The concurrent demote test (<code>changeRole.test.js</code> lines 389-436) only proves in-process serialization works</li>
+          <li>Redis <code>SET NX</code> distributed lock is PLANNED but not implemented or tested</li>
+        </ul>
+
+        <h3>4. <code>$lookup</code> / <code>$unionWith</code> Cross-Collection Isolation</h3>
+        <ul>
+          <li>No aggregation tests with <code>$lookup</code> or <code>$unionWith</code></li>
+          <li>The tenant plugin does NOT auto-scope sub-pipelines (see <a href="part-6-how-it-breaks.html">Part 6, Gap #1</a>)</li>
+          <li>No test proves data leak or proves manual <code>$match</code> works</li>
+        </ul>
+
+        <h3>5. Token Revocation / Blocklist</h3>
+        <ul>
+          <li>15-minute access token window is documented but not tested as a security property</li>
+          <li>No test verifies a deactivated user's token works for up to 15 minutes</li>
+          <li>Redis blocklist is PLANNED but not implemented</li>
+        </ul>
+
+        <h3>6. Bulk Operations (<code>bulkWrite</code>) with <code>runUnscoped</code></h3>
+        <ul>
+          <li>Tests verify <code>bulkWrite</code> throws when scoped (tenantIsolation.test.js lines 373-379)</li>
+          <li>Tests verify <code>bulkWrite</code> works inside <code>runUnscoped</code> (lines 386-395)</li>
+          <li>NO test verifies that a developer using <code>runUnscoped</code> for bulkWrite correctly scopes their operations manually</li>
+        </ul>
+
+        <h3>7. Estimated Document Count</h3>
+        <ul>
+          <li>Tests verify <code>estimatedDocumentCount</code> throws when scoped (tenantIsolation.test.js lines 367-371)</li>
+          <li>Tests verify it works inside <code>runUnscoped</code> (lines 381-384)</li>
+          <li>NO test for the alternative <code>countDocuments</code> performance characteristics</li>
+        </ul>
+
+        <h3>8. Email Delivery / Invite Links</h3>
+        <ul>
+          <li>Invite flow is tested (<code>rbac.test.js</code>, <code>userDeactivate.test.js</code>)</li>
+          <li>But actual email sending, link generation, and token hashing are not integration tested</li>
+          <li>Accept-invite endpoint tested but not the full email → click → accept flow</li>
+        </ul>
+
+        <h2>Test Infrastructure Summary</h2>
+
+        <table>
+          <thead>
+            <tr><th>Component</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>mongodb-memory-server</code></td><td>Real MongoDB in-memory for every test run; no external dependency</td></tr>
+            <tr><td><code>Supertest</code></td><td>HTTP-level testing against the real Express app (no real server needed)</td></tr>
+            <tr><td><code>runWithTenant</code> / <code>runUnscoped</code></td><td>Test helpers to set/clear tenant context — same functions the app uses</td></tr>
+            <tr><td><code>clearTestDB</code></td><td>Runs in <code>beforeEach</code> for complete isolation between tests</td></tr>
+            <tr><td><code>jest.spyOn</code></td><td>Used in <code>activity.test.js</code> to simulate log write failures</td></tr>
+            <tr><td>Separate test apps for rate limiters</td><td><code>signupRateLimit.test.js</code> and <code>loginRateLimit.test.js</code> create fresh Express apps with non-skipped limiters to test the exact production config</td></tr>
+          </tbody>
+        </table>
+
+        <h2>Running the Tests</h2>
+        <pre><code class="language-bash"># Run all tests
+npm test
+
+# Run specific test file
+npm test -- tests/tenantIsolation.test.js
+
+# Run with coverage
+npm test -- --coverage</code></pre>
+
+        <nav class="prev-next-nav">
+          <a href="part-6-how-it-breaks.html" id="prev-link">Previous: Part 6</a>
+          <a href="part-8-interview-prep.html" id="next-link">Next: Part 8</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">
+    Built from the actual Multi-Tenant SaaS codebase
+  </footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

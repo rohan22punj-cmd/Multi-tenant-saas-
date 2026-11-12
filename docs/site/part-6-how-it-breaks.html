@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 6: How It Can Still Break — Isolation Gaps & Weak Spots</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 6: How It Can Still Break — Isolation Gaps & Weak Spots</h1>
+
+        <p class="callout warning">
+          <strong>This page documents known limitations.</strong> The tenant plugin provides strong isolation for standard Mongoose operations, but several gaps exist. Every item here is a real issue in the current codebase — not hypothetical.
+        </p>
+
+        <h2>1. Mongoose <code>aggregate</code> with <code>$lookup</code> and <code>$unionWith</code> — Cross-Collection Joins Are NOT Scoped</h2>
+
+        <p>The <code>tenantPlugin</code> injects a <code>$match: { tenantId }</code> stage at the start of the pipeline. However, <code>$lookup</code> and <code>$unionWith</code> stages execute <strong>independently</strong> and are NOT automatically scoped by the plugin on the target model.</p>
+
+        <h3>The Problem</h3>
+        <pre><code class="language-javascript">// This aggregation runs inside Company A's context
+const results = await Project.aggregate([
+  { $match: { status: 'active' } },  // ← plugin injects { tenantId: "A" } HERE
+  {
+    $lookup: {
+      from: 'tasks',         // ← Tasks collection
+      localField: '_id',
+      foreignField: 'projectId',
+      as: 'tasks'
+    }
+  }
+]);
+
+// The $lookup reads from the ENTIRE tasks collection — it does NOT
+// automatically filter to tenantId: "A". Company A sees Company B's tasks
+// that happen to reference Company A's project IDs (if IDs were predictable).
+</code></pre>
+
+        <h3>Why This Happens</h3>
+        <pre><code class="language-javascript">// src/plugins/tenantPlugin.js (lines 206-213)
+
+schema.pre('aggregate', async function () {
+  if (isUnscoped()) return;
+  const tenantId = getTenantId();
+  const pipeline = this.pipeline();
+  injectAggregateMatch(pipeline, tenantId);  // Only injects at position 0
+});
+
+// injectAggregateMatch (lines 125-146) only prepends $match.
+// It does NOT recurse into $lookup/$unionWith sub-pipelines.
+</code></pre>
+
+        <h3>Fix Options</h3>
+        <ol>
+          <li><strong>Manual $match inside $lookup pipeline:</strong> Add <code>{ $match: { tenantId: getTenantId() } }</code> as the first stage of every <code>$lookup</code> pipeline.</li>
+          <li><strong>Use <code>runUnscoped</code> with explicit filtering:</strong> For complex cross-collection queries, run unscoped and manually filter both collections.</li>
+          <li><strong>Plugin enhancement (future):</strong> Recursively walk the pipeline and inject tenant filters into <code>$lookup</code>/<code>$unionWith</code> sub-pipelines.</li>
+        </ol>
+
+        <p class="callout danger">
+          <strong>Risk:</strong> If project IDs are predictable (sequential ObjectIds), Company A could craft an aggregation that joins into Company B's tasks. Current mitigation: ObjectIds are random enough that this is hard to exploit, but it's a real isolation gap.
+        </p>
+
+        <h2>2. Direct MongoDB Driver Calls Bypass Mongoose Middleware Completely</h2>
+
+        <p>Any code that uses <code>Model.collection.find()</code>, <code>Model.collection.insertOne()</code>, or <code>mongoose.connection.db</code> bypasses the tenant plugin entirely.</p>
+
+        <h3>Examples of Bypass</h3>
+        <pre><code class="language-javascript">// ALL OF THESE BYPASS THE TENANT PLUGIN:
+
+// 1. Direct collection access
+await User.collection.find({}).toArray();  // Returns ALL tenants' users
+
+// 2. Raw MongoDB driver
+const db = mongoose.connection.db;
+await db.collection('users').find({}).toArray();  // No tenant filter
+
+// 3. Bulk operations on collection
+await Project.collection.bulkWrite([
+  { insertOne: { document: { name: 'Hacked', tenantId: 'tenant-B' } } }
+]);  // No tenant check on insert
+
+// 4. Raw aggregation
+await mongoose.connection.db.collection('projects').aggregate([...]).toArray();
+</code></pre>
+
+        <h3>Where This Could Happen Accidentally</h3>
+        <ul>
+          <li>Performance optimization attempts ("Mongoose is slow, let me use the raw driver")</li>
+          <li>Migration scripts that forget to wrap in <code>runUnscoped</code></li>
+          <li>Third-party libraries that accept a Mongoose model and use <code>model.collection</code> internally</li>
+          <li>Debugging code left in production</li>
+        </ul>
+
+        <h3>Fix</h3>
+        <p class="callout info">Enforce a lint rule or code review policy: <strong>Never use <code>.collection</code> or <code>mongoose.connection.db</code> directly.</strong> If you need raw access, use <code>runUnscoped('explicit reason', callback)</code> so the audit trail exists.</p>
+
+        <h2>3. <code>bulkWrite</code> Throws Explicit Error — Forces <code>runUnscoped()</code></h2>
+
+        <p>The tenant plugin intentionally throws on <code>bulkWrite</code> because it cannot safely auto-scope arbitrary operations.</p>
+
+        <h3>The Code</h3>
+        <pre><code class="language-javascript">// src/plugins/tenantPlugin.js (lines 279-294)
+
+schema.pre('bulkWrite', async function () {
+  if (isUnscoped()) return;
+  throw new Error(
+    'bulkWrite() is not supported on tenant-scoped models. ' +
+    'It accepts arbitrary operations that cannot be safely auto-scoped. ' +
+    'Use runUnscoped(reason, callback) with a valid justification if absolutely necessary.'
+  );
+});
+</code></pre>
+
+        <h3>Why This Exists</h3>
+        <p><code>bulkWrite</code> accepts an array of mixed operations (<code>insertOne</code>, <code>updateOne</code>, <code>deleteOne</code>, <code>replaceOne</code>), each with their own filter and update documents. Intercepting and rewriting every operation safely is complex and error-prone.</p>
+
+        <h3>The Risk</h3>
+        <p>Developers forced to use <code>runUnscoped</code> for bulk operations might accidentally widen the scope too far. The required <code>reason</code> string creates an audit trail, but human error is still possible.</p>
+
+        <pre><code class="language-javascript">// Developer must do this (and it's easy to get wrong):
+await runUnscoped('migration: backfill project slugs', async () => {
+  await Project.bulkWrite([
+    { updateOne: { filter: { _id: id1 }, update: { $set: { slug: 'new-slug' } } } },
+    { updateOne: { filter: { _id: id2 }, update: { $set: { slug: 'other-slug' } } } },
+  ]);
+});
+</code></pre>
+
+        <h2>4. <code>estimatedDocumentCount()</code> Throws Explicit Error — Forces <code>countDocuments()</code></h2>
+
+        <h3>The Code</h3>
+        <pre><code class="language-javascript">// src/plugins/tenantPlugin.js (lines 193-201)
+
+schema.pre('estimatedDocumentCount', async function () {
+  if (isUnscoped()) return;
+  throw new Error(
+    'estimatedDocumentCount() cannot be filtered by tenant and is disabled on tenant-scoped models. ' +
+    'Use countDocuments() instead, or wrap in runUnscoped() with a valid reason.'
+  );
+});
+</code></pre>
+
+        <h3>Why</h3>
+        <p><code>estimatedDocumentCount()</code> uses collection metadata (fast, approximate) and <strong>cannot accept a query filter</strong>. It would return the total count across ALL tenants — a massive data leak if allowed.</p>
+
+        <h3>Safe Alternative</h3>
+        <pre><code class="language-javascript">// SLOW but safe — uses query filter (tenant plugin injects tenantId)
+const count = await Project.countDocuments({ status: 'active' });
+
+// FAST but requires explicit justification
+const total = await runUnscoped('analytics: total project count across all tenants', async () => {
+  return Project.estimatedDocumentCount();
+});
+</code></pre>
+
+        <h2>5. The 15-Minute Access Token Window — Deactivated/Demoted Users Retain Access</h2>
+
+        <p>Access tokens are stateless JWTs. When a user is deactivated or demoted, their existing access token remains valid <strong>for up to 15 minutes</strong> (the token expiry).</p>
+
+        <h3>The Code (protect.js)</h3>
+        <pre><code class="language-javascript">// src/middleware/protect.js (lines 9-13)
+
+/**
+ * 3. Takes userId, tenantId, roleId, permissions directly from the
+ *    token payload — NO database call. This is fast (no extra round-
+ *    trip) but means a deactivated user keeps access for up to
+ *    15 minutes until the token expires. That trade-off is intentional
+ *    for Phase 2; we can add a revocation list later if needed.
+ */
+</code></pre>
+
+        <h3>The Code (requirePermission.js)</h3>
+        <pre><code class="language-javascript">// src/middleware/requirePermission.js (lines 62-67)
+
+// Trade-off explanation:
+// Permissions are baked into the JWT access token at issuance.
+// A role change in the database does NOT immediately update existing tokens.
+// The new role permissions take effect only after the user's next token refresh
+// (up to 15 minutes, the access token expiry). This is intentional for Phase 2;
+// a revocation list can be added later if immediate role changes are needed.
+</code></pre>
+
+        <h3>Real-World Impact</h3>
+        <table>
+          <thead>
+            <tr><th>Scenario</th><th>What Happens</th><th>Duration</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Admin deactivates user</td><td>User's access token still works</td><td>Up to 15 min</td></tr>
+            <tr><td>Admin demotes user (admin → member)</td><td>User keeps admin permissions</td><td>Up to 15 min</td></tr>
+            <tr><td>User's role permissions changed</td><td>Old permissions still work</td><td>Up to 15 min</td></tr>
+            <tr><td>Refresh token used</td><td>New access token has correct permissions</td><td>Immediate</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Why This Trade-off?</h3>
+        <ul>
+          <li><strong>Performance:</strong> No DB lookup on every request. <code>protect.js</code> is pure JWT verification — sub-millisecond.</li>
+          <li><strong>Scalability:</strong> Stateless auth works horizontally without shared session store.</li>
+          <li><strong>Simplicity:</strong> No Redis dependency for core auth path.</li>
+        </ul>
+
+        <h3>Fix: Redis Token Blocklist in <code>protect.js</code></h3>
+        <pre><code class="language-javascript">// PLANNED — add to protect.js
+
+import redis from '../config/redis.js';
+
+const protect = async (req, _res, next) => {
+  // ... existing token extraction & verification ...
+
+  // NEW: Check Redis blocklist
+  const isBlocked = await redis.exists(`token:block:${decoded.jti}`);
+  if (isBlocked) {
+    throw new AppError('Token revoked', 401);
+  }
+
+  req.user = { ... };
+  runWithTenant({ tenantId: decoded.tenantId, userId: decoded.userId }, () => next());
+};
+
+// When deactivating/demoting a user:
+await redis.set(`token:block:${user.jti}`, 'revoked', 'EX', 900);  // 15 min TTL
+</code></pre>
+        <p>Requires adding <code>jti</code> (JWT ID) to access tokens at issuance. The blocklist key expires at the same time the token would, so no manual cleanup needed.</p>
+
+        <h2>6. Multi-Process Lock Limitation — <code>withTenantLock</code> Is In-Memory Per Node Process</h2>
+
+        <p>The <code>withTenantLock</code> function in <code>userController.js</code> serializes role changes and deactivations <strong>only within a single Node.js process</strong>.</p>
+
+        <h3>The Code</h3>
+        <pre><code class="language-javascript">// src/controllers/userController.js (lines 44-71)
+
+/**
+ * Per-tenant in-process mutex.
+ *
+ * LIMIT: this only serializes requests handled by this Node process. If the
+ * API runs on several instances, replace it with a distributed lock (Redis
+ * SET NX / MongoDB lease) — the call sites stay the same.
+ */
+const tenantLocks = new Map();
+
+function withTenantLock(tenantId, task) {
+  const key = String(tenantId);
+  const previous = tenantLocks.get(key) || Promise.resolve();
+  const run = previous.then(() => task());
+
+  const tail = run.catch(() => {});
+  tenantLocks.set(key, tail);
+  tail.then(() => {
+    if (tenantLocks.get(key) === tail) tenantLocks.delete(key);
+  });
+
+  return run;
+}
+</code></pre>
+
+        <h3>Why This Exists</h3>
+        <p>The "last admin" checks in <code>deactivate</code> and <code>changeRole</code> are read-check-then-write sequences. Without serialization, two admins could simultaneously demote each other, both seeing "one other admin remains," and the company ends up with zero admins.</p>
+
+        <h3>The Gap</h3>
+        <pre><code class="language-javascript">// Scenario: Two API instances behind a load balancer
+
+// Instance 1 receives: Admin A demotes Admin B
+// Instance 2 receives: Admin B demotes Admin A
+
+// Both instances have their OWN tenantLocks Map.
+// Both pass the "remaining admin count" check.
+// Both writes succeed.
+// Result: ZERO active admins in the company.
+</code></pre>
+
+        <h3>Fix: Distributed Lock via Redis <code>SET NX</code></h3>
+        <pre><code class="language-javascript">// PLANNED — replace withTenantLock implementation
+
+import redis from '../config/redis.js';
+
+async function withTenantLock(tenantId, task) {
+  const lockKey = `lock:tenant:${tenantId}`;
+  const lockValue = `${process.pid}-${Date.now()}-${Math.random()}`;
+
+  // Try to acquire lock (10 second TTL)
+  const acquired = await redis.set(lockKey, lockValue, 'NX', 'EX', 10);
+
+  if (!acquired) {
+    // Wait and retry (simple backoff)
+    await new Promise(r => setTimeout(r, 50));
+    return withTenantLock(tenantId, task);
+  }
+
+  try {
+    return await task();
+  } finally {
+    // Release lock only if we still own it (Lua script for atomicity)
+    const script = `
+      if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+      else
+        return 0
+      end
+    `;
+    await redis.eval(script, 1, lockKey, lockValue);
+  }
+}
+</code></pre>
+
+        <h2>7. Unbuilt / PLANNED Items — Not Tested, Not Protected</h2>
+
+        <p>The following features are designed but not implemented. They have NO tests, NO isolation guarantees, and NO code in the repo.</p>
+
+        <table>
+          <thead>
+            <tr><th>Feature</th><th>Status</th><th>Isolation Risk</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Stripe Billing / Webhooks</td>
+              <td><span class="badge planned">PLANNED</span></td>
+              <td>Webhook handler must verify tenant from Stripe customer metadata; plan sync must use <code>runUnscoped</code> for Tenant model</td>
+            </tr>
+            <tr>
+              <td>Email Invites</td>
+              <td><span class="badge planned">PLANNED</span></td>
+              <td>Invite tokens must be scoped to tenant; acceptance flow must verify companySlug matches token</td>
+            </tr>
+            <tr>
+              <td>Frontend Application</td>
+              <td><span class="badge planned">PLANNED</span></td>
+              <td>No API enforcement — frontend must not send tenantId in requests (backend ignores it anyway)</td>
+            </tr>
+            <tr>
+              <td>Custom Roles</td>
+              <td><span class="badge planned">PLANNED</span></td>
+              <td>Role CRUD must enforce tenant isolation; permission validation must prevent privilege escalation</td>
+            </tr>
+            <tr>
+              <td>Audit Log Export</td>
+              <td><span class="badge planned">PLANNED</span></td>
+              <td>Export endpoint must require <code>user:manage</code> and run scoped; <code>runUnscoped</code> only for super-admin</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="callout info">
+          When these are built, they must follow the same patterns: <code>protect</code> → <code>requirePermission</code> → tenant-scoped service calls. Any <code>runUnscoped</code> usage must have a logged reason.
+        </p>
+
+        <nav class="prev-next-nav">
+          <a href="part-5-request-flows.html" id="prev-link">Previous: Part 5</a>
+          <a href="part-7-testing.html" id="next-link">Next: Part 7</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">
+    Built from the actual Multi-Tenant SaaS codebase
+  </footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

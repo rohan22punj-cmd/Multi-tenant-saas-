@@ -2,21 +2,21 @@
 
 - [x] part-1-idea
 - [x] part-2-system-design
-- [ ] part-3-build-strategy
-- [ ] part-4a-important-code (tenantContext, protect)
-- [ ] part-4b-tenant-plugin
-- [ ] part-4c-permissions
-- [ ] part-4d-login-service
-- [ ] part-4e-refresh-service
-- [ ] part-4f-invite-service
-- [ ] part-4g-change-role
-- [ ] part-4h-plan-limit
-- [ ] part-4i-stripe-webhook (PLANNED)
-- [ ] part-4j-tests-summary
-- [ ] part-5-request-flows
-- [ ] part-6-how-it-breaks
-- [ ] part-7-testing
-- [ ] part-8-interview-prep
-- [ ] part-9-glossary
-- [ ] index.html
-- [ ] search index in app.js
+- [x] part-3-build-strategy
+- [x] part-4a-important-code (tenantContext, protect)
+- [x] part-4b-tenant-plugin
+- [x] part-4c-permissions
+- [x] part-4d-login-service
+- [x] part-4e-refresh-service
+- [x] part-4f-invite-service
+- [x] part-4g-change-role
+- [x] part-4h-plan-limit
+- [x] part-4i-stripe-webhook (PLANNED)
+- [x] part-4j-tests-summary
+- [x] part-5-request-flows
+- [x] part-6-how-it-breaks
+- [x] part-7-testing
+- [x] part-8-interview-prep
+- [x] part-9-glossary
+- [x] index.html
+- [x] search index in app.js

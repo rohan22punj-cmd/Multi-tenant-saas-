@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 9: Glossary - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 9: Glossary</h1>
+        <p class="badge built">BUILT</p>
+
+        <p class="callout real-life">
+          <strong>How to use:</strong> Type in the filter box below to instantly narrow the list. Hover over any term marked with a dotted underline in other pages to see its definition as a tooltip.
+        </p>
+
+        <input type="text" id="glossary-filter" class="glossary-filter" placeholder="Filter terms... (e.g. AsyncLocalStorage, JWT, RBAC)">
+
+        <ul class="glossary-list" id="glossary-list"></ul>
+
+        <div class="prev-next-nav">
+          <a href="part-8-interview-prep.html" id="prev-link">Previous: Part 8</a>
+          <span id="next-link" style="color: var(--color-text); opacity: 0.5;">(End)</span>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+  <script>
+    const glossary = [
+      { term: "AsyncLocalStorage", def: "A Node.js API that creates a 'private notepad' tied to a specific asynchronous operation (like an HTTP request). Data stored here is accessible anywhere in the call stack of that request without passing it through function arguments. Used here to propagate `tenantId` and `userId` from the `protect` middleware to the Mongoose `tenantPlugin`." },
+      { term: "JWT (JSON Web Token)", def: "A compact, URL-safe token format consisting of a header, payload, and signature. The payload contains claims (e.g., `userId`, `tenantId`, `roleId`, `permissions`). Signed with a secret so the server can verify it hasn't been tampered with. Two types used here: short-lived <strong>Access Tokens</strong> (15 min) and long-lived <strong>Refresh Tokens</strong> (7 days)." },
+      { term: "RBAC (Role-Based Access Control)", def: "An authorization model where permissions are grouped into roles (e.g., 'admin', 'member'), and users are assigned roles. In this project, roles are stored in the database per tenant, and code checks for specific permission keys (e.g., `project:create`), not role names." },
+      { term: "tenantId", def: "The unique identifier of a company (tenant) in the system. It is an ObjectId from the `Tenant` collection. It is the single source of truth for data isolation — every document in a tenant-scoped collection carries this `tenantId`." },
+      { term: "Mongoose", def: "The MongoDB object modeling tool (ODM) used in this project. It provides schemas, validation, and middleware (hooks) for MongoDB operations. The custom `tenantPlugin` extends Mongoose to automatically scope all queries." },
+      { term: "Express", def: "The minimal and flexible Node.js web application framework used to build the API. It handles routing, middleware chain, and request/response cycle." },
+      { term: "Middleware", def: "A function in Express that has access to the `req`, `res`, and `next` objects. It can modify them, end the request-response cycle, or call `next()` to pass control to the next middleware. The middleware chain here handles request ID, security headers, body parsing, logging, rate limiting, authentication (`protect`), and authorization (`requirePermission`)." },
+      { term: "bcrypt", def: "A password-hashing function designed to be computationally expensive (slow) to resist brute-force attacks. Uses a 'salt' to ensure identical passwords produce different hashes. This project uses 12 salt rounds." },
+      { term: "Refresh Token", def: "A long-lived token (7 days) used solely to obtain new access tokens without re-entering credentials. It is rotated on every use (old token invalidated, new token issued). If an old token is reused (replay attack), the user's session is wiped. Stored in the database as a SHA-256 hash." },
+      { term: "Tenant Plugin", def: "A Mongoose plugin (`src/plugins/tenantPlugin.js`) that automatically injects a `tenantId` filter into every query and write operation on tenant-scoped models. It force-overwrites any caller-supplied `tenantId` with the verified one from AsyncLocalStorage, blocks `tenantId` modifications, and stamps new documents. It throws clear errors for unsupported operations like `bulkWrite` and `estimatedDocumentCount`." },
+      { term: "Atomic Counter", def: "A pattern to safely increment a counter in a concurrent environment. Instead of reading-then-writing (which can race), a single database operation like `findOneAndUpdate({ _id, projectCount: { $lt: limit } }, { $inc: { projectCount: 1 } })` is used. MongoDB serializes updates to a single document, ensuring only one concurrent request wins the slot." },
+      { term: "Webhook", def: "An HTTP callback endpoint that receives event notifications from an external service (here, Stripe). The planned webhook handler verifies the signature using the raw request body, ensures exactly-once processing via Redis claim + DB unique index, and updates the tenant's plan/subscription status." },
+      { term: "Idempotency", def: "The property of an operation where performing it multiple times produces the same result as performing it once. Critical for Stripe webhooks because Stripe retries failed events. Achieved here via Redis `SETNX EX` claim and a durable MongoDB unique index on `eventId`." },
+      { term: "SHA-256", def: "A cryptographic hash function that produces a 256-bit (32-byte) hash. It is a one-way function: easy to compute, computationally infeasible to reverse. Used here to hash refresh tokens and invite tokens before storing them in the database." },
+      { term: "Timing Attack", def: "A side-channel attack where an attacker infers secret information by measuring how long operations take. In login, if a response is faster for 'user not found' than 'wrong password', an attacker can enumerate valid emails. This project prevents it by always running `bcrypt.compare` against a dummy hash when the user/tenant doesn't exist or is inactive." },
+      { term: "Dummy Hash", def: "A pre-computed bcrypt hash of a dummy string used in the `login` service when no user is found or the user is inactive. Comparing the provided password against this dummy hash ensures the bcrypt operation takes the same amount of time as a real comparison, preventing timing attacks." },
+      { term: "runUnscoped()", def: "An escape hatch in `src/utils/tenantContext.js` that temporarily disables the tenant filter, allowing queries to see all tenants' data. It requires a non-empty `reason` string and logs a warning. Used only for system-level operations on the `Tenant` model or cross-tenant migrations." },
+      { term: "withTenantLock()", def: "An in-memory mutex in `src/controllers/userController.js` that serializes critical sections (role changes, deactivations) per tenant within a single Node.js process. Prevents race conditions like two admins demoting each other simultaneously. Limitation: does not work across multiple Node instances; a distributed Redis lock would be needed for horizontal scaling." },
+      { term: "15-minute Window", def: "The period after a user is deactivated or demoted where their existing Access Token remains valid. Because Access Tokens are stateless (JWT) and not checked against the DB on every request, revocation is not instant. A Redis blocklist would be needed for near-instant revocation." },
+      { term: "Shared Database", def: "A multi-tenancy architecture where all tenants' data lives in the same database collections, distinguished by a `tenantId` field. Cheaper and simpler to operate than database-per-tenant, but relies entirely on correct application-level filtering for isolation." },
+      { term: "Permission Key", def: "A string constant representing a specific capability (e.g., `project:create`, `billing:manage`). Defined in `src/constants/permissions.js`. Roles store arrays of these keys. The `requirePermission` middleware checks if the caller's JWT permissions array includes the required key(s)." },
+      { term: "StripeEvent (PLANNED)", def: "A planned MongoDB collection to store processed Stripe webhook event IDs. A unique index on `eventId` provides a durable, transactional backup for exactly-once processing if Redis is unavailable." },
+      { term: "DUMMY_HASH", def: "A constant bcrypt hash (`$2a$12$dummyhashdummyhashdummyh`) used in `src/services/authService.js` for the dummy compare during login when the user doesn't exist or is inactive. Ensures `bcrypt.compare` runs in constant time." },
+      { term: "hashToken()", def: "A helper function in `src/services/authService.js` that returns the SHA-256 hex digest of a token string (`crypto.createHash('sha256').update(token).digest('hex')`). Used for refresh tokens and invite tokens." },
+      { term: "Stripe (PLANNED)", def: "The payment processor intended for subscription billing. The project has the Stripe SDK installed and config variables defined, but the checkout, portal, and webhook handler pages are not yet built. All design decisions are documented in Part 4i." }
+    ];
+
+    const glossaryList = document.getElementById('glossary-list');
+    const filterInput = document.getElementById('glossary-filter');
+
+    function renderGlossary(filter = '') {
+      glossaryList.innerHTML = '';
+      const lowerFilter = filter.toLowerCase().trim();
+      const filtered = glossary.filter(item =>
+        item.term.toLowerCase().includes(lowerFilter) ||
+        item.def.toLowerCase().includes(lowerFilter)
+      );
+
+      filtered.forEach(item => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="term-name">${escapeHtml(item.term)}</span><div class="term-def">${item.def}</div>`;
+        glossaryList.appendChild(li);
+      });
+    }
+
+    filterInput.addEventListener('input', (e) => {
+      renderGlossary(e.target.value);
+    });
+
+    // Initial render
+    renderGlossary();
+  </script>
+</body>
+</html>

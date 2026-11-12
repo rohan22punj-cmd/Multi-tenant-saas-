@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4j: Test Suite Summary - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4j: Test Suite Summary</h1>
+
+        <p class="callout info">
+          <strong>What this covers:</strong> Key test patterns from the real test files that prove isolation, token rotation, and race-condition safety. All tests run against a real in-memory MongoDB (mongodb-memory-server).
+        </p>
+
+        <h2>Test File Overview</h2>
+        <table>
+          <thead>
+            <tr><th>File</th><th>What It Proves</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>tests/tenantIsolation.test.js</code></td>
+              <td>Two real companies against real MongoDB — query scoping, overwrite prevention, cross-tenant isolation at unit & HTTP level</td>
+            </tr>
+            <tr>
+              <td><code>tests/refreshLogout.test.js</code></td>
+              <td>Refresh token rotation, reuse detection, session wipe, token separation</td>
+            </tr>
+            <tr>
+              <td><code>tests/planLimit.test.js</code></td>
+              <td>Free plan caps, 4th project rejected with 402, concurrent creates race-safe, archiving frees slots, plan read from DB not JWT</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>1. Tenant Isolation — <code>tests/tenantIsolation.test.js</code></h2>
+
+        <h3>Unit Level (Direct Model Calls)</h3>
+        <p>Uses <code>runWithTenant</code> to set context and verifies the tenant plugin scopes every operation:</p>
+
+        <pre><code class="language-javascript">// tests/tenantIsolation.test.js (excerpts)
+
+describe('Tenant Isolation — Unit Level', () => {
+  let tenantA, tenantB, roleA, roleB, userA1, userA2, userB1;
+
+  beforeEach(async () => {
+    tenantA = await createTenant('Company A', 'company-a');
+    tenantB = await createTenant('Company B', 'company-b');
+    roleA = await createRoleInContext(tenantA._id, 'admin', ALL_PERMISSIONS);
+    roleB = await createRoleInContext(tenantB._id, 'admin', ALL_PERMISSIONS);
+    userA1 = await createUserInContext(tenantA._id, 'Alice A1', 'alice@a.com', PASSWORD_HASH, roleA._id);
+    userA2 = await createUserInContext(tenantA._id, 'Alice A2', 'alice2@a.com', PASSWORD_HASH, roleA._id);
+    userB1 = await createUserInContext(tenantB._id, 'Bob B1', 'bob@b.com', PASSWORD_HASH, roleB._id);
+  });
+
+  it('inside A context, find() returns only A users', async () => {
+    const users = await runWithTenant({ tenantId: tenantA._id }, async () => User.find().lean());
+    expect(users).toHaveLength(2);
+    expect(users.every(u => u.tenantId.equals(tenantA._id))).toBe(true);
+  });
+
+  it('inside A context, findById with B user id returns null', async () => {
+    const user = await runWithTenant({ tenantId: tenantA._id }, async () => User.findById(userB1._id).lean());
+    expect(user).toBeNull();
+  });
+
+  it('inside A context, updateOne on B user matches 0 and does not modify', async () => {
+    const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
+      User.updateOne({ _id: userB1._id }, { name: 'HACKED' })
+    );
+    expect(result.matchedCount).toBe(0);
+    expect(result.modifiedCount).toBe(0);
+  });
+
+  it('inside A context, deleteOne on B user deletes 0', async () => {
+    const result = await runWithTenant({ tenantId: tenantA._id }, async () =>
+      User.deleteOne({ _id: userB1._id })
+    );
+    expect(result.deletedCount).toBe(0);
+  });
+
+  it('creating a document with explicit B tenantId in A context throws', async () => {
+    await expect(
+      runWithTenant({ tenantId: tenantA._id }, async () =>
+        User.create({ ..., tenantId: tenantB._id })
+      )
+    ).rejects.toThrow(/does not match current context/i);
+  });
+
+  it('find() outside context throws', async () => {
+    await expect(User.find().lean()).rejects.toThrow(/outside a tenant context/i);
+  });
+});</code></pre>
+
+        <h3>Forced Overwrite Protection</h3>
+        <p>Even if a caller explicitly passes another tenant's ID, the plugin force-overwrites it to the current context:</p>
+
+        <pre><code class="language-javascript">// tests/tenantIsolation.test.js (lines 111-117)
+
+it('inside A context, findOne with explicit B tenantId filter returns null (forced overwrite)', async () => {
+  const user = await runWithTenant({ tenantId: tenantA._id }, async () =>
+    User.findOne({ tenantId: tenantB._id, email: 'bob@b.com' }).lean()
+  );
+  expect(user).toBeNull();
+});</code></pre>
+
+        <h3>HTTP Level — 20+ Concurrent Mixed Requests</h3>
+        <p>Logs in as Company A and Company B, fires 20 concurrent requests to <code>/api/me</code>, verifies zero data mixing:</p>
+
+        <pre><code class="language-javascript">// tests/tenantIsolation.test.js (lines 459-509)
+
+it('20+ mixed concurrent requests to /api/me never mix tenant data', async () => {
+  const requests = [];
+
+  for (let i = 0; i < 10; i++) {
+    requests.push(request(app).get('/api/me').set('Authorization', `Bearer ${tokenA}`));
+  }
+  for (let i = 0; i < 10; i++) {
+    requests.push(request(app).get('/api/me').set('Authorization', `Bearer ${tokenB}`));
+  }
+
+  const responses = await Promise.all(requests);
+
+  // Verify all succeeded
+  responses.forEach(res => expect(res.status).toBe(200));
+
+  // Verify A's requests all see A's tenantId
+  const aResponses = responses.slice(0, 10);
+  aResponses.forEach(res => expect(res.body.data.tenantId).toBe(aTenantId));
+
+  // Verify B's requests all see B's tenantId
+  const bResponses = responses.slice(10, 20);
+  bResponses.forEach(res => expect(res.body.data.tenantId).toBe(bTenantId));
+
+  expect(aTenantId).not.toBe(bTenantId);
+});</code></pre>
+
+        <h3>runUnscoped Escape Hatch</h3>
+        <p>Verifies <code>runUnscoped</code> sees both companies and requires a reason string:</p>
+
+        <pre><code class="language-javascript">// tests/tenantIsolation.test.js (lines 399-420)
+
+it('runUnscoped sees both companies\' users', async () => {
+  const allUsers = await runUnscoped('test: list all users for admin dashboard', async () => User.find().lean());
+  expect(allUsers).toHaveLength(3);
+});
+
+it('runUnscoped requires a non-empty reason', async () => {
+  await expect(runUnscoped('', async () => User.find())).rejects.toThrow(/requires a non-empty reason/);
+});</code></pre>
+
+        <h2>2. Refresh & Logout — <code>tests/refreshLogout.test.js</code></h2>
+
+        <h3>Token Rotation</h3>
+        <pre><code class="language-javascript">// tests/refreshLogout.test.js (lines 57-67)
+
+it('refreshes with a valid token → new access & refresh tokens', async () => {
+  const { accessToken, refreshToken } = await signupAndLogin();
+  const res = await request(app).post('/api/auth/refresh').send({ refreshToken });
+  expect(res.status).toBe(200);
+  expect(res.body.data.accessToken).toBeDefined();
+  expect(res.body.data.refreshToken).toBeDefined();
+  expect(res.body.data.refreshToken).not.toBe(refreshToken); // rotation
+});</code></pre>
+
+        <h3>Reuse Detection & Safety Wipe</h3>
+        <p>Using an old refresh token triggers a wipe — even the <strong>newest</strong> token stops working:</p>
+
+        <pre><code class="language-javascript">// tests/refreshLogout.test.js (lines 81-109)
+
+it('rejects reuse of the OLD refresh token with 401', async () => {
+  const { refreshToken } = await signupAndLogin();
+  const first = await request(app).post('/api/auth/refresh').send({ refreshToken });
+  expect(first.status).toBe(200);
+  const reuse = await request(app).post('/api/auth/refresh').send({ refreshToken });
+  expect(reuse.status).toBe(401);
+});
+
+it('after reuse detection, even the NEWEST refresh token is dead (wipe)', async () => {
+  const { refreshToken } = await signupAndLogin();
+  const first = await request(app).post('/api/auth/refresh').send({ refreshToken });
+  const newRefresh = first.body.data.refreshToken;
+
+  await request(app).post('/api/auth/refresh').send({ refreshToken }); // triggers wipe
+
+  const afterWipe = await request(app).post('/api/auth/refresh').send({ refreshToken: newRefresh });
+  expect(afterWipe.status).toBe(401);
+});</code></pre>
+
+        <h3>Token Separation (Separate Secrets)</h3>
+        <pre><code class="language-javascript">// tests/refreshLogout.test.js (lines 156-171)
+
+it('access token cannot be used as a refresh token', async () => {
+  const { accessToken } = await signupAndLogin();
+  const res = await request(app).post('/api/auth/refresh').send({ refreshToken: accessToken });
+  expect(res.status).toBe(401);
+});
+
+it('refresh token cannot be used as an access token on a protected route', async () => {
+  const { refreshToken } = await signupAndLogin();
+  const res = await request(app).get('/api/me').set('Authorization', `Bearer ${refreshToken}`);
+  expect(res.status).toBe(401);
+});</code></pre>
+
+        <h2>3. Plan Limit — <code>tests/planLimit.test.js</code></h2>
+
+        <h3>Free Plan Cap (Max 3 Projects)</h3>
+        <pre><code class="language-javascript">// tests/planLimit.test.js (lines 38-51)
+
+test('the 4th project is rejected with 402 and the exact payload', async () => {
+  for (const name of ['One', 'Two', 'Three']) {
+    expect((await createProject(company.token, { name })).status).toBe(201);
+  }
+  const res = await createProject(company.token, { name: 'Four' });
+  expect(res.status).toBe(402);
+  expect(res.body).toEqual({
+    error: 'Plan limit reached',
+    limit: 3,
+    plan: 'free',
+  });
+});</code></pre>
+
+        <h3>Race Condition Test — Concurrent Creates</h3>
+        <p>Uses <code>Promise.all</code> to fire two simultaneous creates when the tenant is at 2/3 projects. Only one should succeed:</p>
+
+        <pre><code class="language-javascript">// tests/planLimit.test.js (lines 53-67)
+
+test('two simultaneous creates cannot both pass', async () => {
+  await createProject(company.token, { name: 'One' });
+  await createProject(company.token, { name: 'Two' });
+
+  const [a, b] = await Promise.all([
+    createProject(company.token, { name: 'Race A' }),
+    createProject(company.token, { name: 'Race B' }),
+  ]);
+
+  const statuses = [a.status, b.status].sort();
+  expect(statuses).toEqual([201, 402]);
+
+  const list = await request(app).get('/api/projects').set(auth(company.token));
+  expect(list.body.data.total).toBe(3);
+});</code></pre>
+
+        <h3>Archiving Frees a Slot</h3>
+        <pre><code class="language-javascript">// tests/planLimit.test.js (lines 69-84)
+
+test('archiving a project frees a slot', async () => {
+  const created = [];
+  for (const name of ['One', 'Two', 'Three']) {
+    created.push((await createProject(company.token, { name })).body.data.project._id);
+  }
+  expect((await createProject(company.token, { name: 'Blocked' })).status).toBe(402);
+
+  await request(app).patch(`/api/projects/${created[0]}`).set(auth(company.token)).send({ isArchived: true });
+
+  expect((await createProject(company.token, { name: 'Fits now' })).status).toBe(201);
+});</code></pre>
+
+        <h3>Plan Read from Database — Not JWT</h3>
+        <p>Upgrading the plan in the DB takes effect <strong>without a new token</strong>:</p>
+
+        <pre><code class="language-javascript">// tests/planLimit.test.js (lines 150-162)
+
+test('upgrading the database plan takes effect without a new token', async () => {
+  // Token issued while tenant was on Free
+  for (const name of ['One', 'Two', 'Three']) {
+    expect((await createProject(company.token, { name })).status).toBe(201);
+  }
+  expect((await createProject(company.token, { name: 'Blocked' })).status).toBe(402);
+
+  await setPlan(company.tenantId, 'pro'); // Direct DB update
+
+  // Same token, no refresh: now allowed
+  expect((await createProject(company.token, { name: 'Allowed after upgrade' })).status).toBe(201);
+});</code></pre>
+
+        <h2>Test Infrastructure</h2>
+        <ul>
+          <li><strong>mongodb-memory-server:</strong> Real MongoDB in-memory for every test run</li>
+          <li><strong>Supertest:</strong> HTTP-level testing against the real Express app</li>
+          <li><strong>runWithTenant / runUnscoped:</strong> Test helpers to set/clear tenant context</li>
+          <li><strong>clearTestDB:</strong> Runs before each test for isolation</li>
+        </ul>
+
+        <nav class="prev-next-nav">
+          <a href="part-4i-stripe-webhook.html" id="prev-link">Previous: Part 4i</a>
+          <a href="part-5-request-flows.html" id="next-link">Next: Part 5</a>
+        </nav>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">
+    Built from the actual Multi-Tenant SaaS codebase
+  </footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>
