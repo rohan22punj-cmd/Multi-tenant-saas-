@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login Service & Timing Attack Protection</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
+</head>
+<body>
+    <div class="topbar">Multi-Tenant SaaS Backend Documentation</div>
+    <div class="container">
+        <div class="sidebar">
+            <h3>Authentication</h3>
+            <ul>
+                <li><a href="part-4c-permissions.html">4c Permissions</a></li>
+                <li><a href="part-4d-login-service.html" class="active">4d Login Service</a></li>
+                <li><a href="part-4e-refresh-service.html">4e Refresh Service</a></li>
+                <li><a href="part-4f-invite-service.html">4f Invite Service</a></li>
+                <li><a href="part-4g-change-role.html">4g Change Role</a></li>
+            </ul>
+        </div>
+        <div class="content">
+            <h1>4d Login Service & Timing Attack Protection</h1>
+            <p>This page explains the <code>login()</code> function within <code>src/services/authService.js</code>, focusing on how it handles user authentication, company lookup, user lookup within tenant context, and crucial security measures like timing attack protection and generic error messages.</p>
+
+            <h2><code>login()</code> function in <code>src/services/authService.js</code></h2>
+            <p>The <code>login</code> function is responsible for authenticating an existing user based on their company slug, email, and password. It employs several security practices to prevent enumeration attacks and ensure data integrity.</p>
+
+            <h3>Source: <code>src/services/authService.js</code></h3>
+            <div class="code-section">
+                <button class="copy-button" onclick="copyCode(this)">Copy Code</button>
+                <pre><code class="language-javascript">export async function login({ companySlug, email, password }) {
+  // 1. Find the tenant (unscoped - Tenant model has no tenantId)
+  const tenant = await runUnscoped(
+    'login: find tenant by slug',
+    () => Tenant.findOne({ slug: companySlug })
+  );
+
+  // 2. Find the user within that tenant INSIDE tenant context
+  // Context is set manually here because there's no logged-in request yet —
+  // we just looked up the tenant by slug and know its ID.
+  let user = null;
+  if (tenant) {
+    user = await runWithTenant({ tenantId: tenant._id }, async () => {
+      // tenantId is auto-injected by tenantPlugin; we don't pass it
+      return User.findOne({ email });
+    });
+  }
+
+  // 3. Always run bcrypt.compare to prevent timing attacks.
+  // If user doesn't exist or is inactive, compare against a dummy hash.
+  const hashToCompare = (user && user.isActive) ? user.passwordHash : DUMMY_HASH;
+  const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+  // 4. If any check failed, return the SAME generic message.
+  // This prevents attackers from discovering which companies/emails exist.
+  if (!tenant || !user || !user.isActive || !passwordMatch) {
+    throw new AppError('Invalid credentials', 401);
+  }
+
+  // 5. Fetch the role to get current permissions (inside tenant context)
+  const role = await runWithTenant({ tenantId: tenant._id }, async () => {
+    return Role.findById(user.roleId).lean();
+  });
+  if (!role) {
+    throw new AppError('Invalid credentials', 401);
+  }
+
+  // 6. Issue tokens and store refresh token hash (inside tenant context)
+  const tokens = await runWithTenant({ tenantId: tenant._id }, async () => {
+    return issueAndStoreTokens(user, role.permissions);
+  });
+
+  // 7. Return tokens + minimal user object (no password hash)
+  return {
+    ...tokens,
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: role.name,
+    },
+  };
+}</code></pre>
+            </div>
+
+            <h3>Line-by-line Explanation:</h3>
+            <ol>
+                <li><code>export async function login({ companySlug, email, password }) {</code>: Defines the asynchronous <code>login</code> function, accepting <code>companySlug</code>, <code>email</code>, and <code>password</code> as arguments.</li>
+                <li><code>const tenant = await runUnscoped( ... );</code>: <b>Company Lookup (Unscoped)</b>. This line looks up the tenant using the provided <code>companySlug</code>. It uses <code>runUnscoped</code> because the <code>Tenant</code> model itself is not tenant-scoped (it's the top level of the multi-tenant hierarchy), meaning it doesn't automatically filter by <code>tenantId</code>.</li>
+                <li><code>let user = null; if (tenant) { user = await runWithTenant({ tenantId: tenant._id }, async () => { return User.findOne({ email }); }); }</code>: <b>User Lookup Inside Tenant Context</b>. If a tenant is found, this block looks for the user. Crucially, it uses <code>runWithTenant</code> to establish the context of the identified tenant (<code>tenant._id</code>). This ensures that the <code>User.findOne({ email })</code> query is automatically scoped by the <code>tenantPlugin</code> to only search within that specific tenant, preventing users from one company logging into another.</li>
+                <li><code>const hashToCompare = (user && user.isActive) ? user.passwordHash : DUMMY_HASH; const passwordMatch = await bcrypt.compare(password, hashToCompare);</code>: <b>Dummy Bcrypt Compare for Timing Attack Protection</b>. To prevent timing attacks (where an attacker could infer valid usernames/companies by measuring response times), <code>bcrypt.compare</code> is always executed. If no tenant is found, no user exists, or the user is inactive, the password is compared against a <code>DUMMY_HASH</code>. This ensures the cryptographic comparison takes a consistent amount of time regardless of whether the user or company exists, thus preventing enumeration.</li>
+                <li><code>if (!tenant || !user || !user.isActive || !passwordMatch) { throw new AppError('Invalid credentials', 401); }</code>: <b>Generic Error Message</b>. If any authentication check fails (invalid tenant, user not found, inactive user, or incorrect password), a generic "Invalid credentials" error is returned. This is another critical security measure to prevent attackers from gaining information about the system's state (e.g., distinguishing between "company not found" vs. "user not found" vs. "incorrect password").</li>
+                <li><code>const role = await runWithTenant({ tenantId: tenant._id }, async () => { return Role.findById(user.roleId).lean(); });</code>: Fetches the user's role and associated permissions within the established tenant context.</li>
+                <li><code>const tokens = await runWithTenant({ tenantId: tenant._id }, async () => { return issueAndStoreTokens(user, role.permissions); });</code>: Issues new access and refresh tokens, and stores the hash of the refresh token, all within the tenant's context.</li>
+                <li><code>return { ...tokens, user: { id: user._id, name: user.name, email: user.email, role: role.name, }, };</code>: Returns the newly issued tokens and a minimal user object (without sensitive information like password hashes).</li>
+            </ol>
+
+            <div class="callout info">
+                <h4>Timing Attack Prevention</h4>
+                <p>The use of <code>DUMMY_HASH</code> and a generic error message for all login failures is crucial for preventing timing attacks and user enumeration. Attackers cannot discern valid company slugs or email addresses based on varying response times or error messages.</p>
+            </div>
+
+            <div class="navigation">
+                <a href="part-4c-permissions.html" class="prev">Previous: 4c Permissions</a>
+                <a href="part-4e-refresh-service.html" class="next">Next: 4e Refresh Service</a>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script src="../assets/app.js"></script>
+</body>
+</html>

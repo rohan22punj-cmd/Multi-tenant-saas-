@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Refresh Service & Token Rotation</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
+</head>
+<body>
+    <div class="topbar">Multi-Tenant SaaS Backend Documentation</div>
+    <div class="container">
+        <div class="sidebar">
+            <h3>Authentication</h3>
+            <ul>
+                <li><a href="part-4c-permissions.html">4c Permissions</a></li>
+                <li><a href="part-4d-login-service.html">4d Login Service</a></li>
+                <li><a href="part-4e-refresh-service.html" class="active">4e Refresh Service</a></li>
+                <li><a href="part-4f-invite-service.html">4f Invite Service</a></li>
+                <li><a href="part-4g-change-role.html">4g Change Role</a></li>
+            </ul>
+        </div>
+        <div class="content">
+            <h1>4e Refresh Service & Token Rotation</h1>
+            <p>This page explains the <code>refresh()</code> and <code>logout()</code> functions within <code>src/services/authService.js</code>, focusing on refresh token verification, token hashing, rotation, and reuse detection.</p>
+
+            <h2><code>refresh()</code> function in <code>src/services/authService.js</code></h2>
+            <p>The <code>refresh</code> function handles token renewal using a refresh token. It implements token rotation with reuse detection, ensuring that if an old (already-rotated) token is replayed, all user sessions are killed as a safety measure.</p>
+
+            <h3>Source: <code>src/services/authService.js</code></h3>
+            <div class="code-section">
+                <button class="copy-button" onclick="copyCode(this)">Copy Code</button>
+                <pre><code class="language-javascript">export async function refresh(refreshToken) {
+  const GENERIC_MSG = 'Invalid refresh token';
+
+  // 1. Verify signature and expiry
+  let decoded;
+  try {
+    decoded = verifyRefreshToken(refreshToken);
+  } catch {
+    throw new AppError(GENERIC_MSG, 401);
+  }
+
+  // 2. Find the user and check tenant INSIDE tenant context
+  // Context is set manually here using tenantId from the verified token payload —
+  // there's no logged-in request yet (access token expired).
+  const { userId, tenantId } = decoded;
+
+  const user = await runWithTenant({ tenantId }, async () => {
+    return User.findById(userId);
+  });
+  if (!user || !user.isActive) {
+    throw new AppError(GENERIC_MSG, 401);
+  }
+
+  // 3. Check that the tenant still exists (unscoped - Tenant model)
+  const tenant = await runUnscoped(
+    'refresh: verify tenant still exists',
+    () => Tenant.findById(tenantId)
+  );
+  if (!tenant) {
+    throw new AppError(GENERIC_MSG, 401);
+  }
+
+  // 4. Hash the incoming token and compare with stored hash (inside tenant context)
+  const incomingHash = hashToken(refreshToken);
+
+  if (user.refreshTokenHash !== incomingHash) {
+    // REUSE DETECTED — an old (already-rotated) token is being replayed.
+    // Wipe the stored hash so even the newest token stops working.
+    // This is the safety measure: if an attacker stole the old token,
+    // nuking everything forces the real user to re-login (annoying but safe).
+    await runWithTenant({ tenantId }, async () => {
+      user.refreshTokenHash = null;
+      await user.save();
+    });
+    throw new AppError(GENERIC_MSG, 401);
+  }
+
+  // 5. Fetch the role to get current permissions (inside tenant context)
+  const role = await runWithTenant({ tenantId }, async () => {
+    return Role.findById(user.roleId).lean();
+  });
+  if (!role) {
+    throw new AppError(GENERIC_MSG, 401);
+  }
+
+  // 6. Issue fresh tokens (this also replaces the stored hash) inside tenant context
+  const tokens = await runWithTenant({ tenantId }, async () => {
+    return issueAndStoreTokens(user, role.permissions);
+  });
+
+  return tokens;
+}</code></pre>
+            </div>
+
+            <h3>Line-by-line Explanation:</h3>
+            <ol>
+                <li><code>const GENERIC_MSG = 'Invalid refresh token';</code>: Defines a generic error message used for all refresh failures to prevent leaking information about why a token was rejected.</li>
+                <li><code>let decoded; try { decoded = verifyRefreshToken(refreshToken); } catch { throw new AppError(GENERIC_MSG, 401); }</code>: <b>Refresh Token Verification (refreshSecret)</b>. The incoming refresh token is verified using <code>verifyRefreshToken</code>, which checks the token's signature (using the <code>refreshSecret</code> configured in <code>config/env.js</code>) and its expiry. If verification fails, a generic "Invalid refresh token" error is thrown.</li>
+                <li><code>const { userId, tenantId } = decoded;</code>: Extracts the <code>userId</code> and <code>tenantId</code> from the decoded (verified) token payload.</li>
+                <li><code>const user = await runWithTenant({ tenantId }, async () => { return User.findById(userId); });</code>: Looks up the user within the tenant's context. The context is established using the <code>tenantId</code> extracted from the verified token, ensuring the user lookup is scoped to the correct tenant.</li>
+                <li><code>const tenant = await runUnscoped('refresh: verify tenant still exists', () => Tenant.findById(tenantId));</code>: Verifies the tenant still exists. The <code>runUnscoped</code> wrapper is used because the <code>Tenant</code> model is not tenant-scoped (it's the top level of the hierarchy).</li>
+                <li><code>const incomingHash = hashToken(refreshToken);</code>: <b>Token Hashing (SHA-256)</b>. The incoming refresh token is hashed using the <code>hashToken</code> helper function, which computes a SHA-256 digest. This hash is then compared against the stored hash in the database.</li>
+                <li><code>if (user.refreshTokenHash !== incomingHash) { ... user.refreshTokenHash = null; ... throw new AppError(GENERIC_MSG, 401); }</code>: <b>Token Rotation & Reuse Detection</b>. If the incoming hash does not match the stored hash, it means an old (already-rotated) token is being replayed. As a safety measure, the stored <code>refreshTokenHash</code> is cleared to <code>null</code>, which kills <b>all</b> sessions for that user (they'll need to re-login). This prevents replay attacks even if an attacker has stolen an old token.</li>
+                <li><code>const role = await runWithTenant({ tenantId }, async () => { return Role.findById(user.roleId).lean(); });</code>: Fetches the user's role and associated permissions within the tenant context.</li>
+                <li><code>const tokens = await runWithTenant({ tenantId }, async () => { return issueAndStoreTokens(user, role.permissions); });</code>: Issues fresh access and refresh tokens, and replaces the stored hash (rotation).</li>
+                <li><code>return tokens;</code>: Returns the newly issued tokens.</li>
+            </ol>
+
+            <h2><code>logout()</code> function in <code>src/services/authService.js</code></h2>
+            <p>The <code>logout</code> function invalidates the refresh token by clearing the stored hash. It always succeeds, regardless of whether the token is valid.</p>
+
+            <h3>Source: <code>src/services/authService.js</code></h3>
+            <div class="code-section">
+                <button class="copy-button" onclick="copyCode(this)">Copy Code</button>
+                <pre><code class="language-javascript">export async function logout(refreshToken) {
+  // Best-effort: try to decode the token to find the user.
+  // If it's garbage or expired, we just do nothing — still return success.
+  try {
+    const decoded = verifyRefreshToken(refreshToken);
+    const { userId, tenantId } = decoded;
+
+    // Run inside tenant context using tenantId from the verified token
+    // Context is set manually here because there's no logged-in request.
+    await runWithTenant({ tenantId }, async () => {
+      await User.findByIdAndUpdate(userId, { refreshTokenHash: null });
+    });
+  } catch {
+    // Token is garbage or expired — nothing to clear, that's fine.
+  }
+}</code></pre>
+            </div>
+
+            <h3>Line-by-line Explanation:</h3>
+            <ol>
+                <li><code>export async function logout(refreshToken) {</code>: Defines the asynchronous <code>logout</code> function, accepting a <code>refreshToken</code> argument.</li>
+                <li><code>try { const decoded = verifyRefreshToken(refreshToken); ... }</code>: Attempts to decode and verify the refresh token (signature and expiry check, again using the <code>refreshSecret</code>).</li>
+                <li><code>const { userId, tenantId } = decoded;</code>: Extracts the <code>userId</code> and <code>tenantId</code> from the decoded token payload.</li>
+                <li><code>await runWithTenant({ tenantId }, async () => { await User.findByIdAndUpdate(userId, { refreshTokenHash: null }); });</code>: Runs inside the tenant context, and updates the user, setting <code>refreshTokenHash</code> to <code>null</code>. This invalidates the refresh token so it can never be reused.</li>
+                <li><code>} catch { /* Token is garbage or expired — nothing to clear, that's fine. */ }</code>: If the token is garbage or expired, verification fails and we do nothing — the function still returns success, since logout should never show an error to the user.</li>
+            </ol>
+
+            <div class="callout warning">
+                <h4>Token Hashing & Reuse Detection</h4>
+                <p>Refresh tokens are never stored in raw form — only their SHA-256 hash (via <code>hashToken</code>) is persisted. On every refresh, the stored hash is replaced (rotation). If an old token is detected, the hash is wiped entirely, killing all user sessions as a safety measure.</p>
+            </div>
+
+            <div class="callout info">
+                <h4>Separate Access & Refresh Secrets</h4>
+                <p>Access tokens and refresh tokens use separate secrets configured in <code>config/env.js</code> (<code>ACCESS_SECRET</code> and <code>REFRESH_SECRET</code>). This ensures that even if one secret is compromised, the other type of token remains secure.</p>
+            </div>
+
+            <div class="navigation">
+                <a href="part-4d-login-service.html" class="prev">Previous: 4d Login Service</a>
+                <a href="part-4f-invite-service.html" class="next">Next: 4f Invite Service</a>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script src="../assets/app.js"></script>
+</body>
+</html>

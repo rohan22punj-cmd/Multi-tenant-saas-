@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 4a: Important Code (tenantContext & protect) - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 4a: Important Code (<code>tenantContext.js</code> & <code>protect.js</code>)</h1>
+
+        <h2><code>src/utils/tenantContext.js</code></h2>
+        <p>This file provides a way to automatically associate a tenant ID (and user ID) with every incoming HTTP request, without having to pass it through every function argument manually. It leverages Node.js's <code>AsyncLocalStorage</code> for this purpose, ensuring per-request tenant isolation.</p>
+
+        <pre><code class="language-javascript">import { AsyncLocalStorage } from 'node:async_hooks';
+import logger from '../config/logger.js';
+
+const asyncLocalStorage = new AsyncLocalStorage();
+
+// Internal flag to track when we're intentionally running unscoped
+let unscopedDepth = 0;
+
+/**
+ * Runs the given callback inside an async context that carries
+ * the provided context object (tenantId, userId, …). Typically
+ * called by middleware.
+ *
+ * @param {Object} context - e.g. { tenantId, userId }
+ * @param {Function} callback - the rest of the request handling
+ */
+export function runWithTenant(context, callback) {
+  return asyncLocalStorage.run(context, callback);
+}
+
+/**
+ * Reads the tenantId stored by runWithTenant for the current
+ * request. THROWS if called outside a tenant context.
+ * This prevents silent undefined bugs that leak data.
+ */
+export function getTenantId() {
+  if (unscopedDepth > 0) {
+    // Inside runUnscoped — return undefined so the plugin knows
+    // not to apply a filter. The plugin checks isUnscoped() instead.
+    return undefined;
+  }
+  const store = asyncLocalStorage.getStore();
+  if (!store?.tenantId) {
+    throw new Error(
+      'getTenantId() called outside a tenant context. ' +
+      'Ensure the request passed through protect + tenantContext middleware.'
+    );
+  }
+  return store.tenantId;
+}
+
+/**
+ * Returns the full context object (tenantId, userId, …) for the
+ * current request. Returns undefined if inside runUnscoped.
+ * Throws if no context is set and not unscoped.
+ */
+export function getContext() {
+  if (unscopedDepth > 0) {
+    return undefined;
+  }
+  const store = asyncLocalStorage.getStore();
+  if (!store) {
+    throw new Error(
+      'getContext() called outside a tenant context.'
+    );
+  }
+  return store;
+}
+
+/**
+ * Checks if we are currently inside a runUnscoped block.
+ * Used by the tenant plugin to skip tenant filtering.
+ */
+export function isUnscoped() {
+  return unscopedDepth > 0;
+}
+
+/**
+ * ESCAPE HATCH — runs a callback WITHOUT any tenant filter.
+ *
+ * WHAT THIS DOES:
+ * Temporarily disables the tenant context so Mongoose queries run
+ * unfiltered (see ALL tenants' data). This is DANGEROUS and should
+ * only be used for:
+ *   - System-level operations (migrations, seeding, cron jobs)
+ *   - Cross-tenant analytics/reporting (with strict access control)
+ *   - Operations on the Tenant model itself (which has no tenantId)
+ *
+ * WHY IT EXISTS:
+ * The Tenant model has no tenantId — it IS the tenant. Creating or
+ * looking up tenants by slug must run unscoped. A few other rare
+ * system cases also need it.
+ *
+ * SAFETY MEASURES:
+ * - reason (string) is REQUIRED — forces the developer to justify it
+ * - Logs a WARNING with the reason so every usage is auditable
+ * - Single function name (runUnscoped) makes it trivial to grep:
+ *     grep -r "runUnscoped" src/
+ * - Nesting is tracked so nested calls work correctly
+ *
+ * @param {string} reason - REQUIRED human-readable justification
+ * @param {Function} callback - async function to run unscoped
+ * @returns {Promise<*>} - whatever the callback returns
+ */
+export async function runUnscoped(reason, callback) {
+  if (!reason || typeof reason !== 'string' || !reason.trim()) {
+    throw new Error('runUnscoped() requires a non-empty reason string');
+  }
+
+  unscopedDepth++;
+  logger.warn({ reason, unscopedDepth }, 'runUnscoped: executing without tenant filter');
+
+  try {
+    // Run with an empty store (no tenantId) — getTenantId will return undefined
+    return await asyncLocalStorage.run({}, callback);
+  } finally {
+    unscopedDepth--;
+  }
+}
+
+export default asyncLocalStorage;
+</code></pre>
+
+        <h3>Explanation of <code>tenantContext.js</code>:</h3>
+        <ul>
+            <li><code>AsyncLocalStorage</code>: This is a built-in Node.js API that allows you to store data during the lifetime of an asynchronous operation (like an HTTP request) and retrieve it at any point within that operation's execution flow. It's crucial for multitenancy because it avoids passing <code>tenantId</code> through every function call.</li>
+            <li><code>runWithTenant(context, callback)</code>: This function takes a <code>context</code> object (containing <code>tenantId</code> and <code>userId</code>) and a <code>callback</code>. It executes the <code>callback</code> within a new async context where the provided <code>context</code> is available. This is typically called by the authentication middleware (<code>protect.js</code>) once the tenant is identified.</li>
+            <li><code>getTenantId()</code>: This function retrieves the <code>tenantId</code> from the current async context.
+                <br><b>Why it throws instead of returning <code>undefined</code>:</b> If <code>getTenantId()</code> were to return <code>undefined</code> when no tenant context is set, it could lead to silent data leaks where a query accidentally runs unscoped across all tenants. By throwing an error, the system immediately alerts developers to a missing tenant context, preventing critical security vulnerabilities. When intentionally running unscoped (via <code>runUnscoped</code>), it returns <code>undefined</code>, which the Mongoose plugin interprets as a signal to skip tenant filtering.</li>
+            <li><code>runUnscoped(reason, callback)</code>: This is an "escape hatch" function that temporarily disables tenant filtering for the code executed within its <code>callback</code>. This is a powerful and potentially dangerous operation, as it allows access to data across all tenants.
+                <br><b>Required reason:</b> To mitigate the risks, a <code>reason</code> string is mandatory. This forces developers to explicitly justify why an unscoped operation is necessary and provides an audit trail in the logs. It's used for system-level tasks (migrations, seeding), cross-tenant reporting, or operations on the <code>Tenant</code> model itself.</li>
+            <li><code>unscopedDepth</code> and <code>isUnscoped()</code>: These are used internally to track when <code>runUnscoped</code> is active, allowing for correct nesting of unscoped calls.</li>
+        </ul>
+
+        <h2><code>src/middleware/protect.js</code></h2>
+        <p>This middleware is responsible for authenticating incoming requests and establishing the tenant context. It ensures that only authenticated users with valid tokens can access protected routes and sets up the environment for tenant isolation.</p>
+
+        <pre><code class="language-javascript">import { verifyAccessToken } from '../utils/tokens.js';
+import AppError from '../utils/AppError.js';
+import { runWithTenant } from '../utils/tenantContext.js';
+
+const UNAUTHORIZED = 'Unauthorized';
+
+const protect = async (req, _res, next) => {
+  // 1. Extract the token from the Authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new AppError(UNAUTHORIZED, 401);
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  // 2. Verify signature + expiry (access secret)
+  let decoded;
+  try {
+    decoded = verifyAccessToken(token);
+  } catch {
+    throw new AppError(UNAUTHORIZED, 401);
+  }
+
+  // 3. Build req.user from token payload (no DB lookup)
+  req.user = {
+    userId: decoded.userId,
+    tenantId: decoded.tenantId,
+    roleId: decoded.roleId,
+    permissions: decoded.permissions || [],
+  };
+
+  // 4. Run downstream inside async tenant context
+  runWithTenant(
+    { tenantId: decoded.tenantId, userId: decoded.userId },
+    () => next()
+  );
+};
+
+export default protect;
+</code></pre>
+
+        <h3>Explanation of <code>protect.js</code>:</h3>
+        <ul>
+            <li><b>Line 31-36 (Authorization header parsing):</b> It extracts the JWT from the <code>Authorization</code> header, expecting the format <code>"Bearer <token>"</code>. If the header is missing or malformed, it throws an <code>AppError</code> with a 401 Unauthorized status.</li>
+            <li><b>Line 39-44 (JWT access token verification):</b> The extracted token is then verified using <code>verifyAccessToken</code>. This function checks the JWT's signature (ensuring it hasn't been tampered with) and its expiration date. If verification fails (e.g., invalid signature, expired token), it throws a 401 Unauthorized error.</li>
+            <li><b>Line 47-52 (Extracting tenantId/userId/permissions):</b> Upon successful verification, the payload of the JWT (<code>decoded</code>) is used to populate <code>req.user</code>. This includes <code>userId</code>, <code>tenantId</code>, <code>roleId</code>, and <code>permissions</code>. Critically, this step involves no database lookups, making it very fast. The trade-off is that user role/permission changes in the database won't take effect until the access token expires (typically 15 minutes) and a new one is issued.</li>
+            <li><b>Line 55-58 (Setting AsyncLocalStorage context via <code>runWithTenant</code>):</b> The core of tenant isolation. The <code>tenantId</code> and <code>userId</code> extracted from the token are passed to <code>runWithTenant</code> from <code>tenantContext.js</code>. This ensures that all subsequent code execution within the request (controllers, services, Mongoose plugins) automatically has access to the correct tenant context without explicit passing. The <code>next()</code> Express middleware function is called inside this context, allowing the request to proceed to the next handler.</li>
+        </ul>
+
+        <div class="prev-next-nav">
+          <a href="part-3-build-strategy.html" id="prev-link">Previous: Part 3</a>
+          <a href="part-4b-tenant-plugin.html" id="next-link">Next: Part 4b</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

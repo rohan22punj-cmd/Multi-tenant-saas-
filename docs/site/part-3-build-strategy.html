@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 3: Build Strategy - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 3: The 12 Build Steps</h1>
+        <p class="badge built">BUILT</p>
+
+        <p>This is the story of how we actually built the Multi-Tenant backend, step-by-step. Each step was chosen to solve a specific problem before we moved on to the next dependency.</p>
+
+        <h2>1. The Foundation</h2>
+        <p><strong>Files:</strong> <code>src/server.js</code>, <code>src/app.js</code>, <code>src/config/*</code>, <code>src/utils/AppError.js</code>, <code>src/middleware/errorHandler.js</code></p>
+        <p><strong>Problem:</strong> Need a clean base to hang middleware and routes on without leaking test code into production runtime.</p>
+        <p><strong>How:</strong> Separate Express app setup (<code>app.js</code>) from server listening (<code>server.js</code>). Tests import <code>app.js</code> directly. Custom error handling ensures we never leak raw error stack traces to clients.</p>
+
+        <h2>2. Signup</h2>
+        <p><strong>Files:</strong> <code>src/services/authService.js</code>, <code>src/controllers/authController.js</code></p>
+        <p><strong>Problem:</strong> How to bootstrap a tenant and an admin user simultaneously?</p>
+        <p><strong>How:</strong> We generate a URL-safe slug from the company name, create the tenant, then inside that tenant's context, create an "admin" role and the first user.</p>
+
+        <h2>3. Rate Limiting & Structured Logging</h2>
+        <p><strong>Files:</strong> <code>src/middleware/rateLimiter.js</code>, <code>src/utils/requestId.js</code>, <code>src/utils/requestLogger.js</code></p>
+        <p><strong>Problem:</strong> APIs are easily abused. Without logging, production debugging is blind.</p>
+        <p><strong>How:</strong> Every request is tagged with a UUID (<code>requestId</code>). Logs include this ID for correlation. Rate limiters prevent brute force attacks on auth routes.</p>
+
+        <h2>4. Login with companySlug</h2>
+        <p><strong>Files:</strong> <code>src/services/authService.js</code> (login)</p>
+        <p><strong>Problem:</strong> Multi-tenant logins need more than just email/password—they need to know <em>which</em> company you belong to.</p>
+        <p><strong>How:</strong> We first find the tenant by <code>companySlug</code>, then use that tenantId to scope the user query. This protects against user enumeration.</p>
+
+        <h2>5. Refresh & Logout</h2>
+        <p><strong>Files:</strong> <code>src/services/authService.js</code> (refresh, logout)</p>
+        <p><strong>Problem:</strong> JWTs must expire. Refreshing tokens securely requires preventing replay attacks.</p>
+        <p><strong>How:</strong> Refresh token rotation. If an old token is used, we detect reuse and invalidate all sessions for that user instantly.</p>
+
+        <h2>6. Auth Middleware & Tenant Context</h2>
+        <p><strong>Files:</strong> <code>src/middleware/protect.js</code>, <code>src/utils/tenantContext.js</code></p>
+        <p><strong>Problem:</strong> How to pass "which tenant is this?" down into database queries without passing <code>tenantId</code> through every function argument?</p>
+        <p><strong>How:</strong> We use <code>AsyncLocalStorage</code>. <code>tenantContextMiddleware</code> sets the tenant on every request; <code>tenantPlugin</code> reads this and forces it into every Mongoose query.</p>
+
+        <h2>7. Tenant Plugin</h2>
+        <p><strong>Files:</strong> <code>src/plugins/tenantPlugin.js</code></p>
+        <p><strong>Problem:</strong> Developer error. It is incredibly easy to forget to add <code>tenantId: req.user.tenantId</code> to a <code>findOne()</code> query.</p>
+        <p><strong>How:</strong> We intercept every Mongoose query and automatically inject the tenant restriction. It's impossible to "forget."</p>
+
+        <h2>8. Permission Middleware</h2>
+        <p><strong>Files:</strong> <code>src/middleware/requirePermission.js</code>, <code>src/constants/permissions.js</code></p>
+        <p><strong>Problem:</strong> Simple "is logged in" isn't enough. We need "can this user create projects?"</p>
+        <p><strong>How:</strong> We cache user permissions in their access token payload. Middleware checks this list before calling the route handler.</p>
+
+        <h2>9. Invite Users</h2>
+        <p><strong>Files:</strong> <code>src/controllers/authController.js</code> (invite, acceptInvite)</p>
+        <p><strong>Problem:</strong> How to add members to a tenant without them signing up through the company landing page?</p>
+        <p><strong>How:</strong> Admins invite users via email; users accept with a one-time token that links their new account to the tenant.</p>
+
+        <h2>10. User Management</h2>
+        <p><strong>Files:</strong> <code>src/controllers/userController.js</code></p>
+        <p><strong>Problem:</strong> Users need to be deactivated (fired/left company) or have roles changed.</p>
+        <p><strong>How:</strong> CRUD operations on User model, scoped by tenantId. Deactivation sets <code>isActive: false</code>, preventing login.</p>
+
+        <h2>11. Business Logic</h2>
+        <p><strong>Files:</strong> <code>src/services/projectService.js</code>, <code>src/services/taskService.js</code>, <code>src/services/planService.js</code>, <code>src/services/activityService.js</code></p>
+        <p><strong>Problem:</strong> The actual application logic—managing projects and tasks—while enforcing plan limits (e.g., max 5 projects).</p>
+        <p><strong>How:</strong> Services perform the business logic and check the <code>planService</code> to verify the tenant isn't over their subscription limit before performing writes.</p>
+
+        <h2>12. Billing</h2>
+        <p><strong>Status:</strong> <span class="badge planned">PLANNED</span></p>
+        <p>We have designed the integration with Stripe, but it remains to be built.</p>
+
+        <div class="prev-next-nav">
+          <a href="part-2-system-design.html" id="prev-link">Previous: Part 2</a>
+          <a href="part-4a-important-code.html" id="next-link">Next: Part 4a</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+  <script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plan Limit & Atomic Reservation</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+    <div class="topbar">
+        <a href="index.html">Home</a>
+    </div>
+    <div class="container">
+        <nav class="sidebar">
+            <ul>
+                <li><a href="part-4g-change-role.html">Previous: Change Role</a></li>
+                <li><strong>Plan Limit & Reservation</strong></li>
+                <li><a href="part-4i-stripe-webhook.html">Next: Stripe Webhook</a></li>
+            </ul>
+        </nav>
+        <main>
+            <h1>Plan Limit & Atomic Reservation</h1>
+            <p>We enforce plan limits (like project counts) by reading the plan directly from the database to ensure immediate enforcement when a company upgrades or downgrades.</p>
+
+            <h2>Atomic Reservation</h2>
+            <p>To avoid race conditions where concurrent requests exceed the limit, we use an atomic conditional update in <code>src/services/planService.js</code>.</p>
+            <pre><code class="language-javascript">// src/services/planService.js
+
+const updated = await Tenant.findOneAndUpdate(
+  { _id: tenantId, projectCount: { $lt: limit } },
+  { $inc: { projectCount: 1 } },
+  { new: true }
+);</code></pre>
+
+            <h2>Handling Failures</h2>
+            <p>Because the update is atomic, we reject the request immediately if it fails (no recount-and-retry is needed, as it would cause double-issuance of slots). <code>projectService.js</code> handles compensation if a project creation fails.</p>
+            <pre><code class="language-javascript">// src/services/projectService.js
+
+try {
+  project = await Project.create({ ... });
+} catch (err) {
+  // Compensate: release the slot back
+  await releaseProjectSlot(tenantId);
+  throw err;
+}</code></pre>
+        </main>
+    </div>
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

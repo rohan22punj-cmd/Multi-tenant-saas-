@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stripe Webhook (Planned)</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+    <div class="topbar">
+        <a href="index.html">Home</a>
+    </div>
+    <div class="container">
+        <nav class="sidebar">
+            <ul>
+                <li><a href="part-4h-plan-limit.html">Previous: Plan Limit</a></li>
+                <li><strong>Stripe Webhook</strong></li>
+                <li><a href="part-4j-tests-summary.html">Next: Tests Summary</a></li>
+            </ul>
+        </nav>
+        <main>
+            <h1>Stripe Webhook <span class="badge planned">PLANNED</span></h1>
+            <p>This feature is designed but not yet built in the repository. It will handle real-time plan lifecycle events from Stripe.</p>
+
+            <h2>Architecture</h2>
+            <p>The webhook endpoint will require the raw request body for signature verification. This is achieved via <code>express.raw({ type: 'application/json' })}</code> middleware, preventing downstream JSON parsing that could break signature checks.</p>
+            <pre><code class="language-javascript">// Planned implementation
+const sig = req.headers['stripe-signature'];
+const event = stripe.webhooks.constructEvent(
+  req.body, // raw Buffer
+  sig,
+  process.env.STRIPE_WEBHOOK_SECRET
+);</code></pre>
+
+            <h2>Idempotency</h2>
+            <p>To prevent duplicate processing of the same event, we will use a Redis claim pattern: <code>SET key NX EX</code> to atomically claim the event ID, releasing it on error. A fallback <code>StripeEvent</code> collection with a unique index on <code>eventId</code> provides persistence.</p>
+        </main>
+    </div>
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

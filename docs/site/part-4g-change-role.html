@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Change Role & Deactivate Services</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+    <div class="topbar">
+        <a href="index.html">Home</a>
+    </div>
+    <div class="container">
+        <nav class="sidebar">
+            <ul>
+                <li><a href="part-4f-invite-service.html">Previous: Invite Service</a></li>
+                <li><strong>Change Role & Deactivate</strong></li>
+                <li><a href="part-4h-plan-limit.html">Next: Plan Limit</a></li>
+            </ul>
+        </nav>
+        <main>
+            <h1>Change Role & Deactivate Services</h1>
+            <p>Managing user status and permissions requires strict safety rules to prevent administrative lockouts or unauthorized privilege escalation.</p>
+
+            <h2>Core Logic</h2>
+            <p>Endpoints in <code>src/controllers/userController.js</code> handle user deactivation and role updates. These operations use a per-tenant mutex (<code>withTenantLock</code>) to serialize requests, ensuring that "last-admin" checks are race-condition safe.</p>
+            <pre><code class="language-javascript">// src/controllers/userController.js
+
+const tenantLocks = new Map();
+
+function withTenantLock(tenantId, task) {
+  const key = String(tenantId);
+  const previous = tenantLocks.get(key) || Promise.resolve();
+  const run = previous.then(() => task());
+  // ... mutex implementation ...
+  return run;
+}</code></pre>
+
+            <h2>Security Rules</h2>
+            <ul>
+                <li><strong>Self-Protection:</strong> Users cannot deactivate or demote themselves.</li>
+                <li><strong>Privilege Gap Check:</strong> Users cannot assign a role with higher permissions than they currently hold, nor modify a user who holds permissions they lack.</li>
+                <li><strong>Last-Admin Rule:</strong> Deactivation or demotion of the last active admin (<code>USER_MANAGE</code>) is blocked with a <code>409</code> error.</li>
+            </ul>
+
+            <h2>Refresh Token Revocation</h2>
+            <p>On deactivation or role change, <code>refreshTokenHash</code> is set to <code>null</code>. This forces the user to log in again with their new effective permissions. While the existing access token (up to 15 minutes) remains valid, the user cannot acquire a new one.</p>
+            <pre><code class="language-javascript">// src/controllers/userController.js
+
+target.isActive = false;
+target.refreshTokenHash = null;
+await target.save();</code></pre>
+        </main>
+    </div>
+    <script>hljs.highlightAll();</script>
+</body>
+</html>

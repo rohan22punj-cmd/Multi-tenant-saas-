@@ -1,7 +1,7 @@
 # docs/site build progress
 
-- [ ] part-1-idea
-- [ ] part-2-system-design
+- [x] part-1-idea
+- [x] part-2-system-design
 - [ ] part-3-build-strategy
 - [ ] part-4a-important-code (tenantContext, protect)
 - [ ] part-4b-tenant-plugin
