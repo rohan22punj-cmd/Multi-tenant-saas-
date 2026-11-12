@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 2: System Design - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 2: System Design</h1>
+        <p class="badge built">BUILT</p>
+
+        <h2>One-Page System Map</h2>
+        <div class="diagram">
+<pre>
+┌──────────────┐     ┌────────────────────────────────────────────────────────┐
+│   Client     │────▶│                    Express App                         │
+│  (Browser)   │     │  ┌──────────┐  ┌──────────┐  ┌────────────────────┐  │
+└──────────────┘     │  │ Request  │  │  Auth    │  │    Router Map      │  │
+                     │  │   ID     │  │ protect  │  │  /api/auth/*       │  │
+                     │  └────┬─────┘  └────┬─────┘  │  /api/projects*    │  │
+                     │       │             │        │  /api/tasks*       │  │
+                     │       ▼             ▼        │  /api/users*       │  │
+                     │  ┌─────────────────────────┐  │  /api/activity*    │  │
+                     │  │    AsyncLocalStorage    │  └────────┬───────────┘  │
+                     │  │   (Tenant Context)      │           │              │
+                     │  └───────────┬─────────────┘           ▼              │
+                     │              │              ┌────────────────────┐   │
+                     │              ▼              │  Mongoose Models   │   │
+                     │       ┌──────────────┐      │  (tenantPlugin)    │   │
+                     │       │   MongoDB    │◀────▶│  Tenant, User,     │   │
+                     │       │ (Shared DB)  │      │  Role, Project,    │   │
+                     │       └──────────────┘      │  Task, ActivityLog │   │
+                     │                             └────────────────────┘   │
+                     └────────────────────────────────────────────────────────┘
+                                    ▲              ▲
+                         ┌──────────┴──────┐  ┌────┴─────────┐
+                         │     Redis       │  │   Stripe     │
+                         │ (idempotency)   │  │  (PLANNED)   │
+                         └─────────────────┘  └──────────────┘
+</pre>
+        </div>
+
+        <h2>The Tenancy Decision</h2>
+        <p>Three ways to isolate tenants in a database:</p>
+        <table>
+          <thead>
+            <tr><th>Approach</th><th>Isolation Strength</th><th>Cost</th><th>Complexity</th><th>When It Wins</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Database per tenant</td>
+              <td>Maximum — physically separate</td>
+              <td>High</td>
+              <td>High</td>
+              <td>Regulated industries, huge tenants</td>
+            </tr>
+            <tr>
+              <td>Schema per tenant</td>
+              <td>Strong — separate tables</td>
+              <td>Medium</td>
+              <td>Medium</td>
+              <td>PostgreSQL, moderate scale</td>
+            </tr>
+            <tr>
+              <td><strong>Shared DB + tenantId (this project)</strong></td>
+              <td>Code-enforced — single table, filtered queries</td>
+              <td>Low</td>
+              <td>Low</td>
+              <td>Startups, small teams, portfolio projects</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="callout warning">
+          <strong>Risk accepted:</strong> A bug in the tenant filter could leak data. That's why the entire security model revolves around <code>tenantId</code> coming <strong>only from the verified JWT</strong>, never from the request body, params, or query.
+        </p>
+
+        <h2>Six Design Rules</h2>
+        <ol>
+          <li><strong>tenantId only from JWT</strong> — <code>src/middleware/protect.js</code> decodes the token and puts <code>tenantId</code> in AsyncLocalStorage. No controller reads it from <code>req.body</code>, <code>req.params</code>, or <code>req.query</code>.</li>
+          <li><strong>Isolation in the data layer</strong> — <code>src/plugins/tenantPlugin.js</code> hooks every Mongoose query. Controllers never add <code>tenantId</code> manually.</li>
+          <li><strong>Permissions by key, never role name</strong> — Roles store arrays of permission strings (<code>project:create</code>, etc.). Code checks <code>requirePermission('project:create')</code>. Role names can change; permission keys don't.</li>
+          <li><strong>Refresh tokens and invite tokens stored only as hashes</strong> — <code>SHA-256</code> before save. If the DB leaks, attackers get useless hashes.</li>
+          <li><strong>Every login-style failure returns identical generic message</strong> — "Invalid credentials" for wrong password, wrong company, inactive user, missing user. No enumeration.</li>
+          <li><strong>Webhooks claimed exactly once</strong> — Redis <code>SET NX EX</code> on event ID. If processing fails, delete the key so Stripe retries.</li>
+        </ol>
+
+        <h2>Data Model</h2>
+        <p>Every collection has <code>tenantId</code> as the <strong>first key in its compound indexes</strong> — this makes the tenant filter hit an index prefix.</p>
+        <table>
+          <thead>
+            <tr><th>Collection</th><th>Key Fields</th><th>Indexes</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Tenant</td>
+              <td>name, slug, plan, stripeCustomerId (PLANNED), stripeSubscriptionId (PLANNED), subscriptionStatus (PLANNED), currentPeriodEnd (PLANNED), projectCount</td>
+              <td>unique slug</td>
+            </tr>
+            <tr>
+              <td>User</td>
+              <td>name, email, passwordHash, roleId, isActive, refreshTokenHash</td>
+              <td>unique (tenantId, email)</td>
+            </tr>
+            <tr>
+              <td>Role</td>
+              <td>name, permissions[], isSystemRole</td>
+              <td>unique (tenantId, name)</td>
+            </tr>
+            <tr>
+              <td>Invite</td>
+              <td>email, roleId, invitedBy, tokenHash, expiresAt, acceptedAt</td>
+              <td>tokenHash</td>
+            </tr>
+            <tr>
+              <td>Project</td>
+              <td>name, description, isArchived, createdBy</td>
+              <td>(tenantId, createdAt)</td>
+            </tr>
+            <tr>
+              <td>Task</td>
+              <td>projectId, title, description, status, assigneeId, createdBy, dueDate, position</td>
+              <td>(tenantId, projectId, status), (tenantId, assigneeId)</td>
+            </tr>
+            <tr>
+              <td>ActivityLog</td>
+              <td>actorId, action, entityType, entityId, meta</td>
+              <td>(tenantId, createdAt)</td>
+            </tr>
+            <tr>
+              <td>StripeEvent (PLANNED)</td>
+              <td>eventId, type, tenantId, processedAt</td>
+              <td>unique eventId</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Middleware Chain (per request)</h2>
+        <ol>
+          <li><code>requestId</code> — UUID for tracing</li>
+          <li><code>helmet</code> — security headers</li>
+          <li><code>cors</code> — cross-origin</li>
+          <li><code>express.json</code> — body parsing</li>
+          <li><code>requestLogger</code> — structured log after response</li>
+          <li><code>rate limiters</code> — per-IP caps</li>
+          <li><code>protect</code> — JWT verify → set AsyncLocalStorage tenant context</li>
+          <li><code>requirePermission</code> — check permission key in JWT</li>
+          <li>Controller — thin handler, no tenant logic</li>
+          <li><code>errorHandler</code> — central error formatting</li>
+        </ol>
+
+        <h2>Token Flow</h2>
+        <div class="diagram">
+<pre>
+Login                          Refresh
+┌─────────────────┐            ┌─────────────────┐
+│ POST /login     │            │ POST /refresh   │
+│ companySlug,    │            │ refreshToken    │
+│ email, password │            └────────┬────────┘
+└───────┬─────────┘                     │
+        ▼                               ▼
+┌─────────────────┐            ┌─────────────────┐
+│ Find tenant by  │            │ Verify refresh  │
+│ slug (unscoped) │            │ token signature │
+└───────┬─────────┘            └───────┬─────────┘
+        ▼                               ▼
+┌─────────────────┐            ┌─────────────────┐
+│ Find user in    │            │ Hash incoming   │
+│ tenant context  │            │ token & compare │
+└───────┬─────────┘            └───────┬─────────┘
+        ▼                               ▼
+┌─────────────────┐            ┌─────────────────┐
+│ bcrypt compare  │            │ If match: issue │
+│ (dummy hash if  │            │ new pair, save  │
+│  user missing)  │            │ new refresh hash│
+└───────┬─────────┘            └───────┬─────────┘
+        ▼                               ▼
+┌─────────────────┐            ┌─────────────────┐
+│ Return access   │            │ Return new      │
+│ + refresh tokens│            │ access + refresh│
+└─────────────────┘            └─────────────────┘
+</pre>
+        </div>
+
+        <div class="prev-next-nav">
+          <a href="part-1-idea.html" id="prev-link">Previous: Part 1</a>
+          <a href="part-3-build-strategy.html" id="next-link">Next: Part 3</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

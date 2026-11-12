@@ -1,0 +1,22 @@
+# docs/site build progress
+
+- [ ] part-1-idea
+- [ ] part-2-system-design
+- [ ] part-3-build-strategy
+- [ ] part-4a-important-code (tenantContext, protect)
+- [ ] part-4b-tenant-plugin
+- [ ] part-4c-permissions
+- [ ] part-4d-login-service
+- [ ] part-4e-refresh-service
+- [ ] part-4f-invite-service
+- [ ] part-4g-change-role
+- [ ] part-4h-plan-limit
+- [ ] part-4i-stripe-webhook (PLANNED)
+- [ ] part-4j-tests-summary
+- [ ] part-5-request-flows
+- [ ] part-6-how-it-breaks
+- [ ] part-7-testing
+- [ ] part-8-interview-prep
+- [ ] part-9-glossary
+- [ ] index.html
+- [ ] search index in app.js

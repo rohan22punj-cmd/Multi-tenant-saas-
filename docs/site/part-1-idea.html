@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Part 1: The Idea - Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Part 1: The Idea</h1>
+        <p class="badge built">BUILT</p>
+
+        <h2>What is this project?</h2>
+        <p class="callout real-life">
+          <strong>Real-life analogy:</strong> Imagine a giant apartment building. The building itself (the server + database) is shared by everyone, but each apartment (each tenant/company) has its own locked door, its own key, and its own furniture. The landlord (the backend) manages all apartments but never enters one without permission.
+        </p>
+
+        <p>The project is a <strong>Multi-Tenant SaaS backend</strong>. That means multiple companies (called <em>tenants</em>) share the exact same application and database infrastructure, but their data is completely invisible to each other.</p>
+
+        <h2>The Three Problems It Solves</h2>
+        <ol>
+          <li><strong>Multi-tenancy</strong> — data isolation between companies.</li>
+          <li><strong>Role-Based Access Control (RBAC)</strong> — who can do what inside a company.</li>
+          <li><strong>Billing (Stripe, designed)</strong> — plan limits based on subscription state.</li>
+        </ol>
+
+        <h2>Why Multi-Tenancy?</h2>
+        <p>Before this, if you built one app per company, you'd deploy N times and spend forever. Multi-tenancy lets one codebase serve thousands of companies. The hard part is <em>not</em> leaking one company's data into another's queries.</p>
+
+        <h2>What This Project Is NOT</h2>
+        <ul>
+          <li>It is a backend engine, not a finished SaaS product.</li>
+          <li>No frontend yet (planned).</li>
+          <li>Stripe integration is <strong>PLANNED</strong> (not built).</li>
+          <li>No email, no custom roles beyond admin/member (planned).</li>
+        </ul>
+
+        <h2>Where We Are Now</h2>
+        <p>The foundation, auth, RBAC, tenant isolation, projects, tasks, and plan limits are <strong>BUILT and tested</strong>. Stripe billing is <strong>PLANNED</strong>.</p>
+
+        <div class="prev-next-nav">
+          <a href="part-2-system-design.html" id="prev-link">Previous</a>
+          <a href="part-2-system-design.html" id="next-link">Next: Part 2</a>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <footer class="footer">Built from the actual Multi-Tenant SaaS codebase</footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>

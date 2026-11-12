@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Tenant SaaS Walkthrough</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</head>
+<body>
+  <div id="progress-bar"></div>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="hamburger-menu" aria-label="Toggle menu">☰</button>
+      <h1>Multi-Tenant SaaS Walkthrough</h1>
+    </div>
+    <div class="topbar-right">
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <nav class="sidebar">
+      <ul id="sidebar-menu" class="sidebar-menu"></ul>
+    </nav>
+
+    <main class="content-wrapper">
+      <article>
+        <h1>Multi-Tenant SaaS + RBAC — Complete Walkthrough</h1>
+
+        <p class="callout info">
+          <strong>What this is:</strong> A complete, interactive documentation site for a production-style multi-tenant SaaS backend built with Node.js, Express, MongoDB, Redis, JWT, and Stripe (designed). Every claim in these docs comes from the actual source code — no invented features.
+        </p>
+
+        <p class="callout real-life">
+          <strong>Real-life comparison:</strong> Think of this like an apartment building. The building (database) is shared, but each apartment (tenant) has its own locked door. The key (tenantId from JWT) only opens your apartment — never anyone else's.
+        </p>
+
+        <h2>Progress Tracker</h2>
+        <p>Check off parts as you read them. Your progress is saved locally.</p>
+        <ul id="progress-list" style="list-style: none; padding: 0;"></ul>
+
+        <h2>Quick Navigation</h2>
+        <table>
+          <thead>
+            <tr><th>Part</th><th>Title</th><th>Status</th></tr>
+          </thead>
+          <tbody id="toc-body"></tbody>
+        </table>
+
+        <h2>What's BUILT vs PLANNED</h2>
+        <table>
+          <thead>
+            <tr><th>Area</th><th>Status</th><th>Files</th><th>Proved by</th></tr>
+          </thead>
+          <tbody id="status-body"></tbody>
+        </table>
+
+        <h2>System Map</h2>
+        <div class="diagram">
+<pre>
+┌──────────────┐     ┌────────────────────────────────────────────────────────┐
+│   Client     │────▶│                    Express App                         │
+│  (Browser)   │     │  ┌──────────┐  ┌──────────┐  ┌────────────────────┐  │
+└──────────────┘     │  │ Request  │  │  Auth    │  │    Router Map      │  │
+                     │  │   ID     │  │ protect  │  │  /api/auth/*       │  │
+                     │  └────┬─────┘  └────┬─────┘  │  /api/projects*    │  │
+                     │       │             │        │  /api/tasks*       │  │
+                     │       ▼             ▼        │  /api/users*       │  │
+                     │  ┌─────────────────────────┐  │  /api/activity*    │  │
+                     │  │    AsyncLocalStorage    │  └────────┬───────────┘  │
+                     │  │   (Tenant Context)      │           │              │
+                     │  └───────────┬─────────────┘           ▼              │
+                     │              │              ┌────────────────────┐   │
+                     │              ▼              │  Mongoose Models   │   │
+                     │       ┌──────────────┐      │  (tenantPlugin)    │   │
+                     │       │   MongoDB    │◀────▶│  Tenant, User,     │   │
+                     │       │ (Shared DB)  │      │  Role, Project,    │   │
+                     │       └──────────────┘      │  Task, ActivityLog │   │
+                     │                             └────────────────────┘   │
+                     └────────────────────────────────────────────────────────┘
+                                    ▲              ▲
+                         ┌──────────┴──────┐  ┌────┴─────────┐
+                         │     Redis       │  │   Stripe     │
+                         │ (idempotency)   │  │  (PLANNED)   │
+                         └─────────────────┘  └──────────────┘
+</pre>
+        </div>
+
+        <h2>How to Use This Site</h2>
+        <ul>
+          <li><strong>Sidebar:</strong> Click any part to navigate. Subsections auto-built from headings.</li>
+          <li><strong>Search:</strong> Press <kbd>/</kbd> or click the search box to find terms across all pages.</li>
+          <li><strong>Theme:</strong> Click the moon/sun icon to toggle light/dark mode.</li>
+          <li><strong>Progress:</strong> Check boxes below to track what you've read — saved in your browser.</li>
+          <li><strong>Code blocks:</strong> Copy button on each snippet.</li>
+          <li><strong>Print:</strong> <kbd>Ctrl+P</kbd> — sidebar hides, code wraps nicely for PDF.</li>
+        </ul>
+      </article>
+
+      <nav class="prev-next-nav">
+        <a href="part-1-idea.html" id="prev-link">Previous</a>
+        <a href="part-1-idea.html" id="next-link">Next: Part 1</a>
+      </nav>
+    </main>
+  </div>
+
+  <footer class="footer">
+    Built from the actual Multi-Tenant SaaS codebase • <a href="https://github.com/your-repo">Source</a>
+  </footer>
+
+  <script src="assets/app.js"></script>
+  <script>
+    // Build TOC and progress checkboxes
+    const tocBody = document.getElementById('toc-body');
+    const progressList = document.getElementById('progress-list');
+    const pages = [
+      { id: 'part-1-idea', title: 'The Idea', status: 'built' },
+      { id: 'part-2-system-design', title: 'System Design', status: 'built' },
+      { id: 'part-3-build-strategy', title: 'Build Strategy', status: 'built' },
+      { id: 'part-4a-important-code', title: 'Important Code (tenantContext, protect)', status: 'built' },
+      { id: 'part-4b-tenant-plugin', title: 'Important Code (tenantPlugin)', status: 'built' },
+      { id: 'part-4c-permissions', title: 'Important Code (Permissions)', status: 'built' },
+      { id: 'part-4d-login-service', title: 'Important Code (Login Service)', status: 'built' },
+      { id: 'part-4e-refresh-service', title: 'Important Code (Refresh Service)', status: 'built' },
+      { id: 'part-4f-invite-service', title: 'Important Code (Invite Service)', status: 'built' },
+      { id: 'part-4g-change-role', title: 'Important Code (Change Role/Deactivate)', status: 'built' },
+      { id: 'part-4h-plan-limit', title: 'Important Code (Plan Limit)', status: 'built' },
+      { id: 'part-4i-stripe-webhook', title: 'Important Code (Stripe Webhook)', status: 'planned' },
+      { id: 'part-4j-tests-summary', title: 'Important Code (Test Summary)', status: 'built' },
+      { id: 'part-5-request-flows', title: 'Request Flows', status: 'built' },
+      { id: 'part-6-how-it-breaks', title: 'How It Breaks', status: 'built' },
+      { id: 'part-7-testing', title: 'Testing Strategy', status: 'built' },
+      { id: 'part-8-interview-prep', title: 'Interview Prep', status: 'built' },
+      { id: 'part-9-glossary', title: 'Glossary', status: 'built' },
+    ];
+
+    const progress = JSON.parse(localStorage.getItem('multi-tenant-walkthrough-progress')) || {};
+
+    pages.forEach(p => {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td>${p.title}</td><td><a href="${p.id}.html">${p.title}</a></td><td><span class="badge ${p.status}">${p.status.toUpperCase()}</span></td>`;
+      tocBody.appendChild(row);
+
+      const li = document.createElement('li');
+      li.style.margin = '5px 0';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.id = `prog-${p.id}`;
+      cb.checked = progress[p.id] || false;
+      cb.addEventListener('change', () => {
+        progress[p.id] = cb.checked;
+        localStorage.setItem('multi-tenant-walkthrough-progress', JSON.stringify(progress));
+      });
+      const label = document.createElement('label');
+      label.htmlFor = `prog-${p.id}`;
+      label.textContent = ` ${p.title}`;
+      label.style.cursor = 'pointer';
+      li.appendChild(cb);
+      li.appendChild(label);
+      progressList.appendChild(li);
+    });
+  </script>
+</body>
+</html>
