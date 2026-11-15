@@ -26,6 +26,7 @@ const env = {
   },
   logLevel: process.env.LOG_LEVEL || 'info',
   inviteExpiryDays: parseInt(process.env.INVITE_EXPIRY_DAYS, 10) || 7,
+  passwordResetExpiryHours: parseInt(process.env.PASSWORD_RESET_EXPIRY_HOURS, 10) || 1,
   signupRateLimit: {
     windowMs: parseInt(process.env.SIGNUP_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
     max: parseInt(process.env.SIGNUP_RATE_LIMIT_MAX, 10) || 5,

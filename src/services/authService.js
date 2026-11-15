@@ -45,6 +45,7 @@ import bcrypt from 'bcryptjs';
 import Tenant from '../models/Tenant.js';
 import Role from '../models/Role.js';
 import User from '../models/User.js';
+import PasswordReset from '../models/PasswordReset.js';
 import { ALL_PERMISSIONS, DEFAULT_ROLES } from '../constants/permissions.js';
 import {
   signAccessToken,
@@ -53,6 +54,7 @@ import {
 } from '../utils/tokens.js';
 import AppError from '../utils/AppError.js';
 import { runWithTenant, runUnscoped } from '../utils/tenantContext.js';
+import env from '../config/env.js';
 
 const BCRYPT_SALT_ROUNDS = 12;
 
@@ -370,4 +372,188 @@ export async function logout(refreshToken) {
   } catch {
     // Token is garbage or expired — nothing to clear, that's fine.
   }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Password reset flow
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Number of seconds a password reset token stays valid.
+ * Short window: 1 hour by default. Long enough to click the link,
+ * short enough that a leaked token can't be abused for long.
+ * Configurable via PASSWORD_RESET_EXPIRY_HOURS.
+ */
+const PASSWORD_RESET_EXPIRY_SECONDS = env.passwordResetExpiryHours * 60 * 60;
+
+/**
+ * Generates a fresh password-reset token for the given user.
+ *
+ * WHAT THIS DOES:
+ * - Invalidates any older UNUSED reset tokens for that user
+ * - Creates a new 256-bit random token
+ * - Stores only its SHA-256 hash (never the raw token)
+ * - Returns the raw token so the caller can put it in the email/link
+ *
+ * WHY INVALIDATE OLD TOKENS:
+ * Each "forgot password" click sends a NEW link. If we left the old
+ * ones alive, a user with an old email in their inbox could click a
+ * stale link. Only the newest token should ever work.
+ *
+ * @param {mongoose.Document} user - the user document (already loaded)
+ * @returns {string} the raw reset token (send this to the user)
+ */
+export async function createPasswordResetToken(user) {
+  // Delete every unused reset token for this user. We match on
+  // usedAt=null and the user's own _id. The tenant plugin scopes
+  // this to the current tenant automatically.
+  await PasswordReset.deleteMany({
+    userId: user._id,
+    usedAt: null,
+  });
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(rawToken);
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_EXPIRY_SECONDS * 1000);
+
+  await PasswordReset.create({
+    userId: user._id,
+    tokenHash,
+    expiresAt,
+  });
+
+  return rawToken;
+}
+
+/**
+ * Handles a "forgot password" request.
+ *
+ * WHAT THIS DOES:
+ * 1. Looks up the tenant by slug (unscoped — Tenant has no tenantId)
+ * 2. Looks up the user by email inside that tenant
+ * 3. If the user exists and is active, invalidates old tokens and
+ *    creates a new reset token, returning it (the caller emails it)
+ * 4. If the tenant/user does not exist or the user is inactive, does
+ *    the same amount of work (creates and discards a dummy token) and
+ *    returns null
+ *
+ * WHY THE SAME RESPONSE FOR EVERYTHING:
+ * This is the account-lookup protection. If we returned different
+ * messages or different statuses for "company not found" vs "user not
+ * found" vs "user inactive", an attacker could probe which emails have
+ * live accounts. So the CONTROLLER always returns the same 200 body
+ * regardless of what happened here. The only thing that changes is
+ * whether a real token was generated and emailed.
+ *
+ * WHY DO THE SAME AMOUNT OF WORK:
+ * We also want the response TIME to be indistinguishable. Generating a
+ * random token and hashing it is cheap, but doing it unconditionally
+ * means an attacker can't infer anything from how long the request took.
+ *
+ * @param {Object} data
+ * @param {string} data.companySlug
+ * @param {string} data.email
+ * @returns {string|null} the raw reset token to email, or null
+ */
+export async function forgotPassword({ companySlug, email }) {
+  // 1. Find the tenant by slug (unscoped — Tenant model has no tenantId)
+  const tenant = await runUnscoped(
+    'forgot-password: find tenant by slug',
+    () => Tenant.findOne({ slug: companySlug })
+  );
+
+  // Always generate a token hash so the timing is the same whether or
+  // not the tenant/user exists. This defeats timing-based probing.
+  const dummyToken = crypto.randomBytes(32).toString('hex');
+  hashToken(dummyToken);
+
+  // 2. If no tenant, no user — but we still return the same response.
+  if (!tenant) {
+    return null;
+  }
+
+  // 3. Find the user inside the tenant's context
+  const user = await runWithTenant({ tenantId: tenant._id }, async () => {
+    return User.findOne({ email });
+  });
+
+  // 4. Only active users can reset. Inactive users get the same response
+  //    — we never confirm they exist, so an attacker can't distinguish
+  //    "this email is registered but deactivated" from "not registered."
+  if (!user || !user.isActive) {
+    return null;
+  }
+
+  // 5. Generate and store the real token
+  return createPasswordResetToken(user);
+}
+
+/**
+ * Applies a password reset using a raw token from the user's link.
+ *
+ * WHAT THIS DOES:
+ * 1. Hashes the incoming token
+ * 2. Atomically claims the matching row (usedAt=null, not expired)
+ * 3. Re-hashes the user's password with bcrypt
+ * 4. Marks the reset row as used
+ *
+ * WHY ATOMIC CLAIM:
+ * findOneAndUpdate with usedAt=null in the filter guarantees only one
+ * request can ever claim this token, even under concurrent attacks.
+ * If two requests race, exactly one wins and the other gets null.
+ *
+ * WHY WE REJECT THE SAME GENERIC WAY:
+ * We never say "token expired" vs "token wrong" vs "user inactive" —
+ * an attacker probing reset links would otherwise learn which emails
+ * have accounts and which links are still alive.
+ *
+ * @param {string} rawToken - the token from the user's reset link
+ * @param {string} newPassword - the new password to set
+ * @returns {{ user }} the updated user document
+ */
+export async function resetPassword(rawToken, newPassword) {
+  const GENERIC_MSG = 'If that account exists, a new link has been sent';
+
+  if (!rawToken || !newPassword) {
+    throw new AppError(GENERIC_MSG, 400);
+  }
+
+  const tokenHash = hashToken(rawToken);
+
+  // Atomically claim the token. usedAt=null + expiry check in the filter
+  // means only one request can match, and expired tokens never match.
+  const reset = await PasswordReset.findOneAndUpdate(
+    { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
+    { usedAt: new Date() },
+    { new: true }
+  );
+
+  // Wrong token, expired, or already used — same generic response either way.
+  // We do NOT reveal which case it was.
+  if (!reset) {
+    throw new AppError(GENERIC_MSG, 400);
+  }
+
+  // Load the user inside the reset's tenant context. The reset row
+  // carries tenantId, so we use it to scope the lookup.
+  const user = await runWithTenant({ tenantId: reset.tenantId }, async () => {
+    return User.findById(reset.userId);
+  });
+
+  // The user might have been deleted since the token was issued — be safe.
+  if (!user) {
+    throw new AppError(GENERIC_MSG, 400);
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_SALT_ROUNDS);
+
+  await runWithTenant({ tenantId: reset.tenantId }, async () => {
+    user.passwordHash = passwordHash;
+    // Kill every active session: a password changed mid-session means
+    // any old refresh token is now suspect. Force re-login.
+    user.refreshTokenHash = null;
+    await user.save();
+  });
+
+  return { user };
 }

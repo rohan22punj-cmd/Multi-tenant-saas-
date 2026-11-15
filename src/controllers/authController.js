@@ -21,6 +21,8 @@ import {
   refresh as refreshService,
   logout as logoutService,
   issueAndStoreTokens,
+  forgotPassword as forgotPasswordService,
+  resetPassword as resetPasswordService,
 } from '../services/authService.js';
 import AppError from '../utils/AppError.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -218,9 +220,53 @@ export const acceptInvite = asyncHandler(async (req, res) => {
 });
 
 /**
- * GET /api/users
+ * POST /api/auth/forgot-password
  *
- * Body: none
+ * Body: { companySlug, email }
+ * Returns: 200 "If that account exists, a reset link has been sent"
+ * Public route.
+ */
+export const forgotPassword = asyncHandler(async (req, res) => {
+  const { companySlug, email } = req.body;
+
+  if (!companySlug || !email) {
+    throw new AppError('companySlug and email are required', 400);
+  }
+
+  const token = await forgotPasswordService({ companySlug, email });
+
+  if (token) {
+    // In a real app, send email here: await emailService.sendPasswordReset(email, token);
+    console.debug('Password reset token generated:', token);
+  }
+
+  res.status(200).json({
+    status: 'success',
+    message: 'If that account exists, a reset link has been sent',
+  });
+});
+
+/**
+ * POST /api/auth/reset-password
+ *
+ * Body: { token, newPassword }
+ * Returns: 200 "Password reset successfully"
+ * Public route.
+ */
+export const resetPassword = asyncHandler(async (req, res) => {
+  const { token, newPassword } = req.body;
+
+  if (!token || !newPassword) {
+    throw new AppError('Token and newPassword are required', 400);
+  }
+
+  await resetPasswordService(token, newPassword);
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Password reset successfully',
+  });
+});
  * Protected by protect.js + requirePermission(PERMISSIONS.USER_MANAGE)
  *
  * Returns the list of users in the caller's company (id, name, email, role name, isActive).

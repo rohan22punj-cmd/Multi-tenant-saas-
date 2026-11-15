@@ -2,9 +2,9 @@
  * Auth routes — maps HTTP endpoints to controller functions.
  *
  * WHAT THIS DOES:
- * Defines the four auth endpoints (signup, login, refresh, logout)
- * and the invite + accept-invite + users endpoints.
- * and attaches the correct middleware to each:
+ * Defines the auth endpoints (signup, login, refresh, logout,
+ * forgot-password, reset-password) and the invite + accept-invite +
+ * users endpoints, and attaches the correct middleware to each:
  *
  * - signup and login get the AUTH rate limiter (15 req / 15 min)
  *   to slow down brute-force attempts.
@@ -33,6 +33,8 @@ import {
   invite,
   acceptInvite,
   getUsers,
+  forgotPassword,
+  resetPassword,
 } from '../controllers/authController.js';
 import { signupLimiter, loginLimiter } from '../middleware/rateLimiter.js';
 import { requirePermission } from '../middleware/requirePermission.js';
@@ -44,6 +46,8 @@ const router = Router();
 // Public routes (no token needed, but rate-limited)
 router.post('/signup', signupLimiter, signup);
 router.post('/login', loginLimiter, login);
+router.post('/forgot-password', loginLimiter, forgotPassword);
+router.post('/reset-password', loginLimiter, resetPassword);
 router.post('/refresh', refreshTokens);
 router.post('/logout', logout);
 
