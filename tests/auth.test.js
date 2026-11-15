@@ -28,10 +28,15 @@
 
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import app from '../src/app.js';
 import env from '../src/config/env.js';
 import { connectTestDB, clearTestDB, closeTestDB } from './setup.js';
-import { runUnscoped } from '../src/utils/tenantContext.js';
+import { runUnscoped, runWithTenant } from '../src/utils/tenantContext.js';
+import PasswordReset from '../src/models/PasswordReset.js';
+import User from '../src/models/User.js';
+import { signupCompany, createCompanyUser } from './helpers.js';
 
 // ─── Lifecycle ─────────────────────────────────────────────
 
@@ -466,5 +471,186 @@ describe('POST /api/auth/logout', () => {
     const res = await request(app).post('/api/auth/logout').send({});
 
     expect(res.status).toBe(200);
+  });
+});
+
+describe('Password Reset Flow', () => {
+  let company, adminUser;
+
+  beforeEach(async () => {
+    // Setup a company and an admin user for testing
+    company = await signupCompany();
+    adminUser = await createCompanyUser(company, {
+      email: `admin.${Date.now()}@${company.slug}.com`,
+      roleName: 'admin',
+    });
+  });
+
+  describe('POST /api/auth/forgot-password', () => {
+    it('should return 200 and send an email if the user exists and is active', async () => {
+      const res = await request(app)
+        .post('/api/auth/forgot-password')
+        .send({ companySlug: company.slug, email: adminUser.email });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe('If that account exists, a reset link has been sent');
+
+      // Verify a PasswordReset token was created in the DB
+      const passwordResetToken = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return PasswordReset.findOne({ userId: adminUser.id });
+      });
+      expect(passwordResetToken).toBeDefined();
+      expect(passwordResetToken.usedAt).toBeUndefined();
+      expect(passwordResetToken.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('should return 200 even if the company does not exist', async () => {
+      const res = await request(app)
+        .post('/api/auth/forgot-password')
+        .send({ companySlug: 'non-existent-company', email: adminUser.email });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe('If that account exists, a reset link has been sent');
+
+      // No token should be created for non-existent company
+      const passwordResetToken = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return PasswordReset.findOne({ userId: adminUser.id });
+      });
+      expect(passwordResetToken).toBeNull();
+    });
+
+    it('should return 200 even if the user does not exist in the company', async () => {
+      const res = await request(app)
+        .post('/api/auth/forgot-password')
+        .send({ companySlug: company.slug, email: 'nonexistent@example.com' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe('If that account exists, a reset link has been sent');
+
+      // No token should be created for non-existent user
+      const passwordResetToken = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return PasswordReset.findOne({ userId: adminUser.id });
+      });
+      expect(passwordResetToken).toBeNull();
+    });
+
+    it('should return 200 even if the user is inactive', async () => {
+      // Deactivate the admin user
+      await runWithTenant({ tenantId: company.tenantId }, async () => {
+        await User.findByIdAndUpdate(adminUser.id, { isActive: false });
+      });
+
+      const res = await request(app)
+        .post('/api/auth/forgot-password')
+        .send({ companySlug: company.slug, email: adminUser.email });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe('If that account exists, a reset link has been sent');
+
+      // No token should be created for inactive user
+      const passwordResetToken = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return PasswordReset.findOne({ userId: adminUser.id });
+      });
+      expect(passwordResetToken).toBeNull();
+    });
+
+    it('should invalidate older unused tokens for the same user', async () => {
+      // Create first token
+      await request(app)
+        .post('/api/auth/forgot-password')
+        .send({ companySlug: company.slug, email: adminUser.email });
+
+      // Create second token (should invalidate first by deleting it)
+      await request(app)
+        .post('/api/auth/forgot-password')
+        .send({ companySlug: company.slug, email: adminUser.email });
+
+      const tokens = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return PasswordReset.find({ userId: adminUser.id }).sort({ createdAt: 1 });
+      });
+
+      // Older unused tokens are deleted by createPasswordResetToken
+      expect(tokens.length).toBe(1);
+      expect(tokens[0].usedAt).toBeUndefined(); // Fresh token
+    });
+  });
+
+  describe('POST /api/auth/reset-password', () => {
+    let rawToken;
+
+    beforeEach(async () => {
+      // Generate a token for the admin user before each test
+      await request(app)
+        .post('/api/auth/forgot-password')
+        .send({ companySlug: company.slug, email: adminUser.email });
+
+      // Retrieve the reset doc from DB and override its hash with a known token's hash
+      const resetDoc = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return PasswordReset.findOne({ userId: adminUser.id, usedAt: null });
+      });
+
+      rawToken = crypto.randomBytes(32).toString('hex');
+      const newTokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+      await runWithTenant({ tenantId: company.tenantId }, async () => {
+        await PasswordReset.findByIdAndUpdate(resetDoc._id, { tokenHash: newTokenHash });
+      });
+    });
+
+    it('should reset the password for a valid token and user', async () => {
+      const newPassword = 'NewSecureP@ss123';
+      const res = await request(app)
+        .post('/api/auth/reset-password')
+        .send({ token: rawToken, newPassword });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe('Password reset successfully');
+
+      // Verify user's password is changed and old refresh token is cleared
+      const updatedUser = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return User.findById(adminUser.id);
+      });
+      const passwordMatch = await bcrypt.compare(newPassword, updatedUser.passwordHash);
+      expect(passwordMatch).toBe(true);
+      expect(updatedUser.refreshTokenHash).toBeNull();
+
+      // Verify the reset token is marked as used
+      const usedToken = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return PasswordReset.findOne({ userId: adminUser.id });
+      });
+      expect(usedToken.usedAt).toBeDefined();
+    });
+
+    it('should fail with 400 for an invalid or expired token', async () => {
+      const newPassword = 'NewSecureP@ss123';
+      const invalidToken = 'invalidtoken123';
+      const res = await request(app)
+        .post('/api/auth/reset-password')
+        .send({ token: invalidToken, newPassword });
+
+      expect(res.status).toBe(400);
+
+      // Ensure password was not reset
+      const originalUser = await runWithTenant({ tenantId: company.tenantId }, async () => {
+        return User.findById(adminUser.id);
+      });
+      const passwordMatch = await bcrypt.compare(adminUser.password, originalUser.passwordHash);
+      expect(passwordMatch).toBe(true);
+    });
+
+    it('should fail with 400 if the token is already used', async () => {
+      const newPassword = 'NewSecureP@ss123';
+      // First, use the token successfully
+      await request(app)
+        .post('/api/auth/reset-password')
+        .send({ token: rawToken, newPassword });
+
+      // Now try to use it again
+      const res = await request(app)
+        .post('/api/auth/reset-password')
+        .send({ token: rawToken, newPassword: 'AnotherNewPass' });
+
+      expect(res.status).toBe(400);
+    });
   });
 });
