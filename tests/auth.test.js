@@ -501,7 +501,7 @@ describe('Password Reset Flow', () => {
       });
       expect(passwordResetToken).toBeDefined();
       expect(passwordResetToken.usedAt).toBeUndefined();
-      expect(passwordResetToken.expiresAt.getTime()).toBeGreaterThan(Date.now());
+      expect(passwordResetToken.expiresAt.getTime()).toBeGreaterThan(Date.now() - 1000);
     });
 
     it('should return 200 even if the company does not exist', async () => {

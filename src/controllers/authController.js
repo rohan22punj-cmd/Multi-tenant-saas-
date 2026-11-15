@@ -267,6 +267,11 @@ export const resetPassword = asyncHandler(async (req, res) => {
     message: 'Password reset successfully',
   });
 });
+
+/**
+ * GET /api/users
+ *
+ * Body: none
  * Protected by protect.js + requirePermission(PERMISSIONS.USER_MANAGE)
  *
  * Returns the list of users in the caller's company (id, name, email, role name, isActive).
