@@ -66,7 +66,7 @@ export async function reserveProjectSlot(tenantId) {
   const updated = await Tenant.findOneAndUpdate(
     { _id: tenantId, projectCount: { $lt: limit } },
     { $inc: { projectCount: 1 } },
-    { new: true }
+    { returnDocument: 'after' }
   );
 
   if (updated) {

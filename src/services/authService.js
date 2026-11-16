@@ -525,7 +525,7 @@ export async function resetPassword(rawToken, newPassword) {
   const reset = await PasswordReset.findOneAndUpdate(
     { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
     { usedAt: new Date() },
-    { new: true }
+    { returnDocument: 'after' }
   );
 
   // Wrong token, expired, or already used — same generic response either way.

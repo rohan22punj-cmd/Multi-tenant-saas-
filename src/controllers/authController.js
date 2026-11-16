@@ -176,7 +176,7 @@ export const acceptInvite = asyncHandler(async (req, res) => {
     const invite = await Invite.findOneAndUpdate(
       { tokenHash, acceptedAt: null, expiresAt: { $gt: new Date() } },
       { acceptedAt: new Date() },
-      { new: true }
+      { returnDocument: 'after' }
     );
 
     if (!invite) {
