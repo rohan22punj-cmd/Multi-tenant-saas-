@@ -19,6 +19,10 @@
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import swaggerUi from 'swagger-ui-express';
+import YAML from 'yaml';
+import fs from 'node:fs';
+import path from 'node:path';
 import requestId from './middleware/requestId.js';
 import requestLogger from './middleware/requestLogger.js';
 import errorHandler from './utils/errorHandler.js';
@@ -39,7 +43,37 @@ const app = express();
 app.use(requestId);
 
 // ─── Security & parsing ───
-app.use(helmet()); // sets security-related HTTP headers
+// Serve OpenAPI docs ONLY in non-production OR when ENABLE_API_DOCS=true
+const enableApiDocs = process.env.NODE_ENV !== 'production' || process.env.ENABLE_API_DOCS === 'true';
+if (enableApiDocs) {
+  const specPath = path.resolve('src/docs/openapi.yaml');
+  const spec = YAML.parse(fs.readFileSync(specPath, 'utf8'));
+  // Relax helmet's script-src for Swagger UI inline scripts ONLY on /api/docs
+  // swaggerUi.serve needs to handle both /api/docs and /api/docs/
+  app.use('/api/docs', helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'script-src': ["'self'", "'unsafe-inline'"],
+        'style-src': ["'self'", "'unsafe-inline'"],
+      },
+    },
+  }), swaggerUi.serve);
+  app.get('/api/docs', swaggerUi.setup(spec, { explorer: true }));
+  app.get('/api/docs/', swaggerUi.setup(spec, { explorer: true }));
+  app.get('/api/docs.json', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.send(spec);
+  });
+}
+// Apply helmet to all other routes (without the relaxed CSP)
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/docs')) {
+    helmet()(req, res, next);
+  } else {
+    next();
+  }
+});
 app.use(cors()); // allows cross-origin requests (configurable later)
 app.use(express.json()); // parses JSON request bodies
 

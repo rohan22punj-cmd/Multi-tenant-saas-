@@ -1,0 +1,2103 @@
+openapi: 3.0.3
+info:
+  title: Multi-Tenant SaaS API
+  version: 1.0.0
+  description: |
+    Multi-Tenant SaaS Backend with RBAC — OpenAPI 3.0 Specification
+
+    ### Multi-Tenancy
+    This API uses **token-based multi-tenancy**. The `tenantId` is **never** sent in the request body, query, or path.
+    It is extracted **exclusively** from the verified JWT access token (the `tenantId` claim). This means:
+    - Every protected endpoint automatically scopes all database operations to the caller's tenant.
+    - A user from Company A can never read or write Company B's data, even if they know the IDs.
+    - The `protect` middleware verifies the JWT and sets `req.user = { userId, tenantId, roleId, permissions }`.
+
+    ### Token Lifecycle
+    - **Access Token**: 15 minutes (JWT, stateless). Contains `userId`, `tenantId`, `roleId`, and `permissions` array.
+    - **Refresh Token**: 7 days (JWT, stateful — SHA-256 hash stored in DB). Rotation with reuse detection.
+    - On login/signup/refresh: returns both tokens. Store the refresh token securely (HttpOnly cookie or secure storage).
+    - On logout: the refresh token hash is cleared; the token can never be used again.
+
+    ### How to Use Swagger UI
+    1. Open this page (GET `/api/docs`).
+    2. Click **Authorize** (top right).
+    3. Enter your access token as: `Bearer <your-access-token>`.
+    4. All protected routes will now send the token automatically.
+    5. To get a token first: call `POST /api/auth/signup` or `POST /api/auth/login` (they are public).
+
+    ### Permission Model
+    - Permissions are checked by **key**, never by role name (e.g., `project:delete`, not "admin").
+    - Roles in the database hold arrays of permission keys.
+    - The JWT bakes permissions into the access token at issuance.
+    - A role change in the DB takes effect on the **next token refresh** (up to 15 min). This is intentional for Phase 2.
+
+    ### Error Format
+    All errors follow this shape:
+    ```json
+    { "status": "error", "statusCode": 400, "message": "Human-readable message" }
+    ```
+
+    ### Rate Limiting
+    - Auth endpoints: 15 req / 15 min per IP
+    - General API: 100 req / 15 min per IP
+    - Returns 429 with `Retry-After` header.
+
+servers:
+  - url: http://localhost:3000
+    description: Development server
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: Authentication, signup, login, tokens, password reset, invites
+  - name: Users
+    description: User management (deactivate, reactivate, role change)
+  - name: Invites
+    description: User invitation workflows
+  - name: Projects
+    description: Project CRUD (scoped to tenant)
+  - name: Tasks
+    description: Task CRUD (scoped to project and tenant)
+  - name: Activity
+    description: Read-only activity/audit feed
+  - name: Billing
+    description: Billing and plan limits (demo endpoints only)
+  - name: Health
+    description: Health check endpoints
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT access token from login/signup/refresh.
+        Format: `Authorization: Bearer <access-token>`
+        Token expires in 15 minutes. Use the refresh endpoint to get a new one.
+
+  schemas:
+    Error:
+      type: object
+      required:
+        - status
+        - statusCode
+        - message
+      properties:
+        status:
+          type: string
+          enum: [error]
+        statusCode:
+          type: integer
+          example: 400
+        message:
+          type: string
+          example: "Invalid credentials"
+    User:
+      type: object
+      required:
+        - id
+        - name
+        - email
+        - role
+        - isActive
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: MongoDB ObjectId as string
+          example: "507f1f77bcf86cd799439011"
+        name:
+          type: string
+          example: "Alice Admin"
+        email:
+          type: string
+          format: email
+          example: "alice@acme.com"
+        role:
+          type: string
+          example: "admin"
+        isActive:
+          type: boolean
+          example: true
+    Project:
+      type: object
+      required:
+        - id
+        - name
+        - isArchived
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439012"
+        name:
+          type: string
+          example: "Website Redesign"
+        description:
+          type: string
+          nullable: true
+          example: "Redesign the marketing website"
+        isArchived:
+          type: boolean
+          example: false
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Task:
+      type: object
+      required:
+        - id
+        - projectId
+        - title
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439013"
+        projectId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439012"
+        title:
+          type: string
+          example: "Design new homepage"
+        description:
+          type: string
+          nullable: true
+          example: "Create Figma mockups"
+        status:
+          type: string
+          enum: [todo, in-progress, done]
+          example: "todo"
+        assigneeId:
+          type: string
+          format: uuid
+          nullable: true
+          example: "507f1f77bcf86cd799439011"
+        dueDate:
+          type: string
+          format: date-time
+          nullable: true
+        position:
+          type: number
+          example: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ActivityLog:
+      type: object
+      required:
+        - id
+        - actorId
+        - action
+        - entityType
+        - entityId
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439014"
+        actorId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439011"
+        action:
+          type: string
+          example: "project.created"
+        entityType:
+          type: string
+          example: "project"
+        entityId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439012"
+        meta:
+          type: object
+          example:
+            name: "Website Redesign"
+        createdAt:
+          type: string
+          format: date-time
+    Pagination:
+      type: object
+      required:
+        - items
+        - page
+        - limit
+        - total
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          example: 20
+        total:
+          type: integer
+          example: 42
+    Tenant:
+      type: object
+      required:
+        - id
+        - name
+        - slug
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439010"
+        name:
+          type: string
+          example: "Acme Corp"
+        slug:
+          type: string
+          example: "acme-corp"
+    Tokens:
+      type: object
+      required:
+        - accessToken
+        - refreshToken
+      properties:
+        accessToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        refreshToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    SignupRequest:
+      type: object
+      required:
+        - companyName
+        - adminName
+        - email
+        - password
+      properties:
+        companyName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "Acme Corp"
+        adminName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "Alice Admin"
+        email:
+          type: string
+          format: email
+          example: "alice@acme.com"
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          example: "SecureP@ss123"
+    LoginRequest:
+      type: object
+      required:
+        - companySlug
+        - email
+        - password
+      properties:
+        companySlug:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "acme-corp"
+        email:
+          type: string
+          format: email
+          example: "alice@acme.com"
+        password:
+          type: string
+          minLength: 1
+          example: "SecureP@ss123"
+    RefreshRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    LogoutRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    ForgotPasswordRequest:
+      type: object
+      required:
+        - companySlug
+        - email
+      properties:
+        companySlug:
+          type: string
+          example: "acme-corp"
+        email:
+          type: string
+          format: email
+          example: "alice@acme.com"
+    ResetPasswordRequest:
+      type: object
+      required:
+        - token
+        - newPassword
+      properties:
+        token:
+          type: string
+          example: "raw-reset-token-from-email"
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
+          example: "NewSecureP@ss456"
+    AcceptInviteRequest:
+      type: object
+      required:
+        - companySlug
+        - token
+        - name
+        - password
+      properties:
+        companySlug:
+          type: string
+          example: "acme-corp"
+        token:
+          type: string
+          example: "raw-invite-token-from-link"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "Bob Member"
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          example: "MemberP@ss123"
+    InviteRequest:
+      type: object
+      required:
+        - email
+        - roleId
+      properties:
+        email:
+          type: string
+          format: email
+          example: "newuser@example.com"
+        roleId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439015"
+    InviteResponse:
+      type: object
+      required:
+        - inviteId
+        - email
+        - expiresAt
+        - inviteLink
+      properties:
+        inviteId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439016"
+        email:
+          type: string
+          format: email
+          example: "newuser@example.com"
+        expiresAt:
+          type: string
+          format: date-time
+        inviteLink:
+          type: string
+          format: uri
+          example: "http://localhost:3000/accept-invite?company=acme-corp&token=abc123"
+    UsersListResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+    ProjectCreateRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "Website Redesign"
+        description:
+          type: string
+          maxLength: 500
+          example: "Redesign the marketing website"
+    ProjectUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "Website Redesign v2"
+        description:
+          type: string
+          maxLength: 500
+          example: "Updated scope"
+        isArchived:
+          type: boolean
+          example: false
+    TaskCreateRequest:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "Design new homepage"
+        description:
+          type: string
+          maxLength: 2000
+          example: "Create Figma mockups"
+        status:
+          type: string
+          enum: [todo, in-progress, done]
+          example: "todo"
+        assigneeId:
+          type: string
+          format: uuid
+          nullable: true
+          example: "507f1f77bcf86cd799439011"
+        dueDate:
+          type: string
+          format: date-time
+          nullable: true
+        position:
+          type: number
+          example: 0
+    TaskUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "Design new homepage"
+        description:
+          type: string
+          maxLength: 2000
+          example: "Updated scope"
+        status:
+          type: string
+          enum: [todo, in-progress, done]
+          example: "in-progress"
+        assigneeId:
+          type: string
+          format: uuid
+          nullable: true
+          example: "507f1f77bcf86cd799439011"
+        dueDate:
+          type: string
+          format: date-time
+          nullable: true
+        position:
+          type: number
+          example: 1
+    ChangeRoleRequest:
+      type: object
+      required:
+        - roleId
+      properties:
+        roleId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439015"
+    DeactivateResponse:
+      type: object
+      required:
+        - id
+        - isActive
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439011"
+        isActive:
+          type: boolean
+          example: false
+    MeResponse:
+      type: object
+      required:
+        - userId
+        - tenantId
+        - contextTenantId
+        - permissions
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439011"
+        tenantId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439010"
+        contextTenantId:
+          type: string
+          format: uuid
+          example: "507f1f77bcf86cd799439010"
+        permissions:
+          type: array
+          items:
+            type: string
+          example: ["project:create", "project:read", "project:update", "project:delete"]
+    PlanLimitError:
+      type: object
+      required:
+        - error
+        - limit
+        - plan
+      properties:
+        error:
+          type: string
+          example: "Plan limit reached"
+        limit:
+          type: integer
+          example: 3
+        plan:
+          type: string
+          example: "free"
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid access token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: "error"
+            statusCode: 401
+            message: "Unauthorized"
+    Forbidden:
+      description: Token valid but missing required permission
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: "error"
+            statusCode: 403
+            message: "Forbidden"
+    NotFound:
+      description: Resource not found (or not in your tenant)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: "error"
+            statusCode: 404
+            message: "User not found"
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: "error"
+            statusCode: 429
+            message: "Too many requests from this IP. Please slow down."
+      headers:
+        Retry-After:
+          description: Seconds until the rate limit resets
+          schema:
+            type: integer
+            example: 900
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: "error"
+            statusCode: 400
+            message: "companyName, adminName, email, and password are all required"
+    Conflict:
+      description: Resource already exists (e.g., duplicate email, slug)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: "error"
+            statusCode: 409
+            message: "User already exists"
+    PaymentRequired:
+      description: Plan limit reached (402)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PlanLimitError'
+          example:
+            error: "Plan limit reached"
+            limit: 3
+            plan: "free"
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Returns OK if the server is running. No auth, no rate limit.
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                    example: "ok"
+
+  /api/me:
+    get:
+      tags: [Auth]
+      summary: Get current user info from token
+      description: |
+        Returns the decoded token payload (userId, tenantId, permissions).
+        Requires a valid Bearer token. No additional permission check.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Token payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/signup:
+    post:
+      tags: [Auth]
+      summary: Sign up a new company and admin user
+      description: |
+        Creates a new tenant, default roles (admin, member), and the first admin user.
+        Returns access + refresh tokens. Rate limited: 15 req / 15 min per IP.
+        **Permission**: none (public)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+      responses:
+        '201':
+          description: Company and admin created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - accessToken
+                      - refreshToken
+                      - tenant
+                      - user
+                    properties:
+                      accessToken:
+                        type: string
+                      refreshToken:
+                        type: string
+                      tenant:
+                        $ref: '#/components/schemas/Tenant'
+                      user:
+                        type: object
+                        required:
+                          - id
+                          - name
+                          - email
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                          name:
+                            type: string
+                          email:
+                            type: string
+                            format: email
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in to an existing company
+      description: |
+        Requires companySlug (to identify the tenant), email, and password.
+        Returns access + refresh tokens. Rate limited: 10 req / 15 min per IP.
+        **Permission**: none (public)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - accessToken
+                      - refreshToken
+                      - user
+                    properties:
+                      accessToken:
+                        type: string
+                      refreshToken:
+                        type: string
+                      user:
+                        type: object
+                        required:
+                          - id
+                          - name
+                          - email
+                          - role
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                          name:
+                            type: string
+                          email:
+                            type: string
+                            format: email
+                          role:
+                            type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid credentials (same message for all failure reasons)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 401
+                message: "Invalid credentials"
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token using refresh token
+      description: |
+        Implements rotation with reuse detection. If the token hash matches,
+        issues new tokens and replaces the hash. If it doesn't match, clears
+        the hash (killing all sessions) and returns 401.
+        **Permission**: none (uses refresh token, not access token)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: New tokens issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Tokens'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid or reused refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 401
+                message: "Invalid refresh token"
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (invalidate refresh token)
+      description: |
+        Clears the stored refresh token hash. Always returns 200 even if the
+        token is missing or invalid — logout should never show an error.
+        **Permission**: none (public)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - message
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  message:
+                    type: string
+                    example: "Logged out successfully"
+
+  /api/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset link
+      description: |
+        Returns a generic success message regardless of whether the account exists
+        (to prevent email enumeration). In production, sends an email with the token.
+        Rate limited: same as login.
+        **Permission**: none (public)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+      responses:
+        '200':
+          description: Reset link sent (or would be sent)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - message
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  message:
+                    type: string
+                    example: "If that account exists, a reset link has been sent"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Reset password using token from email
+      description: |
+        Token is single-use and expires (default 1 hour). Returns generic message
+        for all failure cases to avoid leaking info.
+        **Permission**: none (public)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - message
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  message:
+                    type: string
+                    example: "Password reset successfully"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/auth/auth/accept-invite:
+    post:
+      tags: [Invites]
+      summary: Accept an invitation and create account
+      description: |
+        Public endpoint — no login required. Creates the user with the invited
+        email and role, hashes the password, marks the invite as accepted,
+        and returns tokens like login.
+        Returns the same generic 400 for all failures (wrong company, wrong token,
+        expired, already used).
+        **Permission**: none (public)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInviteRequest'
+      responses:
+        '200':
+          description: Invite accepted, user created, tokens issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - accessToken
+                      - refreshToken
+                      - user
+                    properties:
+                      accessToken:
+                        type: string
+                      refreshToken:
+                        type: string
+                      user:
+                        type: object
+                        required:
+                          - id
+                          - name
+                          - email
+                          - role
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                          name:
+                            type: string
+                          email:
+                            type: string
+                            format: email
+                          role:
+                            type: string
+        '400':
+          description: Invalid or expired invite
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 400
+                message: "Invalid or expired invite"
+
+  /api/auth/users/invite:
+    post:
+      tags: [Invites]
+      summary: Invite a user to the company
+      description: |
+        Sends an invitation email (in production) and returns an invite link
+        with the raw token for testing. The inviter must have ALL permissions
+        that the target role has (no privilege escalation).
+        Returns 409 if user already exists; replaces pending invite if one exists.
+        **Permission**: `user:invite`
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteRequest'
+      responses:
+        '201':
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/InviteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Role not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 404
+                message: "Role not found"
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/auth/users:
+    get:
+      tags: [Users]
+      summary: List all users in the company
+      description: |
+        Returns users with id, name, email, role name, and isActive.
+        Never includes passwordHash or refreshTokenHash.
+        **Permission**: `user:manage`
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/users/{id}/deactivate:
+    patch:
+      tags: [Users]
+      summary: Deactivate a user
+      description: |
+        Sets isActive=false and clears refreshTokenHash (cuts off future logins).
+        Access token stays valid for up to 15 min (stateless trade-off).
+        Guards:
+        - Cannot deactivate yourself (403)
+        - Cannot deactivate the last active admin (409)
+        - Cannot deactivate someone with permissions you don't have (403)
+        **Permission**: `user:manage`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439011"
+      responses:
+        '200':
+          description: User deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeactivateResponse'
+        '400':
+          description: Invalid ObjectId format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 400
+                message: "Invalid user id"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Cannot deactivate the last admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 409
+                message: "Cannot deactivate the last admin"
+
+  /api/users/{id}/reactivate:
+    patch:
+      tags: [Users]
+      summary: Reactivate a user
+      description: |
+        Sets isActive=true. Idempotent — already-active users return 200.
+        **Permission**: `user:manage`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439011"
+      responses:
+        '200':
+          description: User reactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeactivateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/users/{id}/role:
+    patch:
+      tags: [Users]
+      summary: Change a user's role
+      description: |
+        Changes the user's roleId and clears refreshTokenHash (forces re-login
+        to get new permissions). Guards:
+        - Cannot change your own role (403)
+        - Cannot assign a role with permissions you don't have (403)
+        - Cannot change someone who has permissions you don't have (403)
+        - Cannot demote the last active admin (409)
+        - Idempotent: if already has that role, returns 200
+        **Permission**: `user:manage`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439011"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeRoleRequest'
+      responses:
+        '200':
+          description: Role changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - id
+                      - roleId
+                      - roleName
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      roleId:
+                        type: string
+                        format: uuid
+                      roleName:
+                        type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: User or role not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 404
+                message: "Role not found"
+        '409':
+          description: Cannot demote the last admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 409
+                message: "Cannot demote the last admin"
+
+  /api/projects:
+    post:
+      tags: [Projects]
+      summary: Create a project
+      description: |
+        Creates a project in the caller's tenant. Enforces plan limit (402 if exceeded).
+        createdBy is stamped from the token.
+        **Permission**: `project:create`
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreateRequest'
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - project
+                    properties:
+                      project:
+                        $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Projects]
+      summary: List projects in the company
+      description: |
+        Returns paginated list. Supports ?page=1&limit=20&includeArchived=true.
+        **Permission**: `project:read`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: includeArchived
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Paginated project list
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - items
+                      - page
+                      - limit
+                      - total
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Project'
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/projects/{id}:
+    get:
+      tags: [Projects]
+      summary: Get a single project
+      description: |
+        Returns the project if it belongs to the caller's tenant.
+        **Permission**: `project:read`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439012"
+      responses:
+        '200':
+          description: Project found
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - project
+                    properties:
+                      project:
+                        $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Projects]
+      summary: Update a project
+      description: |
+        Updates name, description, or isArchived. Enforces plan limit on archive/unarchive (402).
+        **Permission**: `project:update`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439012"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdateRequest'
+      responses:
+        '200':
+          description: Project updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - project
+                    properties:
+                      project:
+                        $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Projects]
+      summary: Delete a project
+      description: |
+        Hard delete. Also deletes all tasks in the project (cascade in service).
+        **Permission**: `project:delete`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439012"
+      responses:
+        '200':
+          description: Project deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - deleted
+                    properties:
+                      deleted:
+                        type: boolean
+                        example: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/projects/{projectId}/tasks:
+    post:
+      tags: [Tasks]
+      summary: Create a task in a project
+      description: |
+        Creates a task belonging to the project. Validates project exists in caller's tenant.
+        Assignee must be in the same tenant and active (enforced in service).
+        **Permission**: `task:create`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439012"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+      responses:
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - task
+                    properties:
+                      task:
+                        $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Project not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 404
+                message: "Project not found"
+    get:
+      tags: [Tasks]
+      summary: List tasks in a project
+      description: |
+        Returns paginated list. Supports ?page=1&limit=20&status=todo.
+        **Permission**: `task:read`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439012"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [todo, in-progress, done]
+      responses:
+        '200':
+          description: Paginated task list
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - items
+                      - page
+                      - limit
+                      - total
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Task'
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Project not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: "error"
+                statusCode: 404
+                message: "Project not found"
+
+  /api/tasks/mine:
+    get:
+      tags: [Tasks]
+      summary: List tasks assigned to me
+      description: |
+        Returns paginated list of tasks where assigneeId = caller's userId.
+        Supports ?page=1&limit=20&status=todo.
+        **Permission**: `task:read`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [todo, in-progress, done]
+      responses:
+        '200':
+          description: Paginated task list
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - items
+                      - page
+                      - limit
+                      - total
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Task'
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/tasks/{id}:
+    get:
+      tags: [Tasks]
+      summary: Get a single task
+      description: |
+        Returns the task if it belongs to the caller's tenant (via project).
+        **Permission**: `task:read`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439013"
+      responses:
+        '200':
+          description: Task found
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - task
+                    properties:
+                      task:
+                        $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Tasks]
+      summary: Update a task
+      description: |
+        Updates title, description, status, assigneeId, dueDate, position.
+        Validates assignee is in same tenant and active.
+        **Permission**: `task:update`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439013"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdateRequest'
+      responses:
+        '200':
+          description: Task updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - task
+                    properties:
+                      task:
+                        $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Tasks]
+      summary: Delete a task
+      description: |
+        Hard delete.
+        **Permission**: `task:delete`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+            example: "507f1f77bcf86cd799439013"
+      responses:
+        '200':
+          description: Task deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    required:
+                      - deleted
+                    properties:
+                      deleted:
+                        type: boolean
+                        example: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/activity:
+    get:
+      tags: [Activity]
+      summary: List activity log (audit trail)
+      description: |
+        Read-only append-only audit trail. Newest first. Supports ?page=1&limit=20 (max 100).
+        **Permission**: `user:manage`
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Paginated activity log
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - data
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Pagination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/demo/read:
+    get:
+      tags: [Billing]
+      summary: Demo endpoint — requires project:read
+      description: |
+        Test-only route to verify permission checks work. Will be removed when real routes exist.
+        **Permission**: `project:read`
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Read allowed
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                properties:
+                  message:
+                    type: string
+                    example: "Read allowed"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/demo/project:
+    delete:
+      tags: [Billing]
+      summary: Demo endpoint — requires project:delete
+      description: |
+        Test-only route to verify permission checks work. Will be removed when real routes exist.
+        **Permission**: `project:delete`
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Project deleted (demo)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                properties:
+                  message:
+                    type: string
+                    example: "Project deleted"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/demo/billing:
+    get:
+      tags: [Billing]
+      summary: Demo endpoint — requires billing:view
+      description: |
+        Test-only route to verify permission checks work. Will be removed when real routes exist.
+        **Permission**: `billing:view`
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Billing viewed (demo)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                properties:
+                  message:
+                    type: string
+                    example: "Billing viewed"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/demo/roles:
+    get:
+      tags: [Billing]
+      summary: Demo endpoint — lists roles in tenant (requires user:manage)
+      description: |
+        Test-only route used by tests to resolve role IDs. Will be removed when real routes exist.
+        **Permission**: `user:manage`
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of roles
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - _id
+                        - name
+                        - permissions
+                      properties:
+                        _id:
+                          type: string
+                          format: uuid
+                        name:
+                          type: string
+                        permissions:
+                          type: array
+                          items:
+                            type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
