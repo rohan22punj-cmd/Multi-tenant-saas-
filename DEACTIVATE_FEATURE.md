@@ -13,7 +13,7 @@ Both routes require:
 - Valid MongoDB ObjectId for `:id` param (validated before controller)
 
 ## Files Created/Modified
-
+<!-- 
 ### Created:
 - `src/controllers/userController.js` — Deactivate & reactivate handlers
 - `src/routes/userRoutes.js` — User management routes
@@ -24,7 +24,7 @@ Both routes require:
 - `src/routes/rbacDemo.routes.js` — Added GET `/api/demo/roles` for tests
 - `src/services/authService.js` — Explicitly stamped `tenantId` on Role.create()
 
-## Plain-English Explanations
+## Plain-English Explanations -->
 
 ### Why We Wipe the Refresh Token on Deactivation
 
