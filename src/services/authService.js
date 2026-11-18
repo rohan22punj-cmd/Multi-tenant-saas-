@@ -404,25 +404,32 @@ const PASSWORD_RESET_EXPIRY_SECONDS = env.passwordResetExpiryHours * 60 * 60;
  * @returns {string} the raw reset token (send this to the user)
  */
 export async function createPasswordResetToken(user) {
-  // Delete every unused reset token for this user. We match on
-  // usedAt=null and the user's own _id. The tenant plugin scopes
-  // this to the current tenant automatically.
-  await PasswordReset.deleteMany({
-    userId: user._id,
-    usedAt: null,
+  // Create the reset token inside the user's tenant context. The
+  // tenant plugin stamps tenantId on create() and scopes deleteMany/create —
+  // running unscoped here would throw (or worse, leak another tenant's rows).
+  // The user was already resolved inside the caller's tenant context, so
+  // user.tenantId is the tenant this reset belongs to.
+  return await runWithTenant({ tenantId: user.tenantId }, async () => {
+    // Delete every unused reset token for this user. We match on
+    // usedAt=null and the user's own _id. The tenant plugin scopes
+    // this to the current tenant automatically.
+    await PasswordReset.deleteMany({
+      userId: user._id,
+      usedAt: null,
+    });
+
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_EXPIRY_SECONDS * 1000);
+
+    await PasswordReset.create({
+      userId: user._id,
+      tokenHash,
+      expiresAt,
+    });
+
+    return rawToken;
   });
-
-  const rawToken = crypto.randomBytes(32).toString('hex');
-  const tokenHash = hashToken(rawToken);
-  const expiresAt = new Date(Date.now() + PASSWORD_RESET_EXPIRY_SECONDS * 1000);
-
-  await PasswordReset.create({
-    userId: user._id,
-    tokenHash,
-    expiresAt,
-  });
-
-  return rawToken;
 }
 
 /**
@@ -522,10 +529,22 @@ export async function resetPassword(rawToken, newPassword) {
 
   // Atomically claim the token. usedAt=null + expiry check in the filter
   // means only one request can match, and expired tokens never match.
-  const reset = await PasswordReset.findOneAndUpdate(
-    { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
-    { usedAt: new Date() },
-    { returnDocument: 'after' }
+  //
+  // This runs UNSCOPED on purpose: a reset link is identified only by its
+  // raw token (which the user carries in the URL), not by a tenant. We have
+  // no tenant context here, and the tenant plugin throws when a query has
+  // no context. Looking up by tokenHash is safe — it's a 256-bit SHA-256
+  // hash of a 32-byte random token, so it's globally unique and there's no
+  // risk of leaking another tenant's row. Once claimed we learn
+  // reset.tenantId and scope everything after it.
+  const reset = await runUnscoped(
+    'reset-password: claim token by hash',
+    async () =>
+      PasswordReset.findOneAndUpdate(
+        { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
+        { usedAt: new Date() },
+        { returnDocument: 'after' }
+      )
   );
 
   // Wrong token, expired, or already used — same generic response either way.
