@@ -517,6 +517,11 @@ describe('Regression — Existing Auth Tests Still Pass', () => {
     password: 'SecureP@ss123',
   };
 
+  // Ensure 'Acme Corp' tenant exists for tests that reference it
+  beforeEach(async () => {
+    await request(app).post('/api/auth/signup').send(validSignup);
+  });
+
   async function signupAndGetTokens(overrides = {}) {
     const res = await request(app).post('/api/auth/signup').send({ ...validSignup, ...overrides });
     return res;
