@@ -217,7 +217,7 @@ describe('PATCH /api/users/:id/deactivate and /reactivate', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .expect(200);
 
-    const loginRes = await loginAs({ companySlug: tenantSlug, email: 'member@gamma.com' });
+    const loginRes = await loginAs({ companySlug: tenantSlug, email: 'member@gamma.com', password: 'MemberP@ss123' });
     expect(loginRes.status).toBe(200);
   });
 

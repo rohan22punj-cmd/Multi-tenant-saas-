@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel older runs of the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Main test job ───────────────────────────────────────────────
+  test:
+    name: Test (Node 20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Redis service container for tests that need real Redis
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # Cache mongodb-memory-server binary between runs
+    env:
+      # Point mongodb-memory-server to the cache directory
+      MONGOMS_DOWNLOAD_DIR: ${{ runner.temp }}/mongodb-memory-server
+      MONGOMS_SYSTEM_BINARY: ${{ runner.temp }}/mongodb-memory-server/mongod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Run tests
+        run: npm run test:ci
+        env:
+          # Fake secrets for CI — real values are never needed in tests.
+          # Tests use mongodb-memory-server (no real Mongo) and the Redis
+          # service container above. JWT/Stripe/App_URL only need to be
+          # non-empty strings; the test suite never contacts external services.
+          NODE_ENV: test
+          REDIS_URL: redis://localhost:6379
+          JWT_ACCESS_SECRET: ci-fake-access-secret-do-not-use-in-production
+          JWT_REFRESH_SECRET: ci-fake-refresh-secret-do-not-use-in-production
+          APP_URL: http://localhost:3000
+          STRIPE_SECRET_KEY: sk_test_fake_ci_key
+          STRIPE_WEBHOOK_SECRET: whsec_fake_ci_key
+          LOG_LEVEL: error
+
+      - name: Upload coverage
+        if: always() && hashFiles('coverage/**/*') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage
+          retention-days: 7
+
+  # ─── Security audit ──────────────────────────────────────────────
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true  # Report but don't fail — see explanation below
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit (high only)
+        run: npm audit --audit-level=high
+
+  # ─── Docker validation ───────────────────────────────────────────
+  docker:
+    name: Docker build & compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t multi-tenant-saas:ci .
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
