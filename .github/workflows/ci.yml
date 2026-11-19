@@ -30,11 +30,13 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-    # Cache mongodb-memory-server binary between runs
+    # Cache mongodb-memory-server binary between runs.
+    # github.workspace is valid at job-level env; mongodb-memory-server
+    # defaults to ~/.cache/mongodb-memory-server anyway, so this just makes
+    # the cache location explicit and stable across runs.
     env:
-      # Point mongodb-memory-server to the cache directory
-      MONGOMS_DOWNLOAD_DIR: ${{ runner.temp }}/mongodb-memory-server
-      MONGOMS_SYSTEM_BINARY: ${{ runner.temp }}/mongodb-memory-server/mongod
+      MONGOMS_DOWNLOAD_DIR: ${{ github.workspace }}/.mongodb-memory-server
+      MONGOMS_SYSTEM_BINARY: ${{ github.workspace }}/.mongodb-memory-server/mongod
 
     steps:
       - name: Checkout
