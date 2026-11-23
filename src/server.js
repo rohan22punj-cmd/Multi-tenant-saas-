@@ -11,11 +11,13 @@ import app from './app.js';
 import env from './config/env.js';
 import connectDB from './config/db.js';
 import { connectRedis } from './config/redis.js';
+import { initRevocation } from './services/revocation.service.js';
 
 const start = async () => {
   try {
     await connectDB();
     await connectRedis();
+    await initRevocation(); // Initialize revocation list (Redis-backed)
 
     app.listen(env.port, () => {
       console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);

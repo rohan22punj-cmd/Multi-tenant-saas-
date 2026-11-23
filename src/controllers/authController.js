@@ -34,6 +34,7 @@ import Tenant from '../models/Tenant.js';
 import config from '../config/env.js';
 import crypto from 'node:crypto';
 import { runWithTenant } from '../utils/tenantContext.js';
+import { revokeUser } from '../services/revocation.service.js';
 
 const BCRYPT_SALT_ROUNDS = 12;
 
@@ -117,6 +118,7 @@ export const refreshTokens = asyncHandler(async (req, res) => {
  * Body: { refreshToken }
  * Always returns 200 — logout should never show an error.
  * Clears the stored hash so the refresh token can never be reused.
+ * Also revokes the user's own access tokens instantly via Redis.
  */
 export const logout = asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;
@@ -124,6 +126,12 @@ export const logout = asyncHandler(async (req, res) => {
   // Even if refreshToken is missing or garbage, we return 200.
   // The service handles this gracefully.
   await logoutService(refreshToken || '');
+
+  // Revoke this user's own access tokens instantly (optional: only own sessions)
+  // We use the authenticated user's context from protect middleware
+  if (req.user) {
+    await revokeUser(req.user.tenantId, req.user.userId);
+  }
 
   res.status(200).json({
     status: 'success',
@@ -252,6 +260,8 @@ export const forgotPassword = asyncHandler(async (req, res) => {
  * Body: { token, newPassword }
  * Returns: 200 "Password reset successfully"
  * Public route.
+ *
+ * Also revokes all existing access tokens for that user instantly via Redis.
  */
 export const resetPassword = asyncHandler(async (req, res) => {
   const { token, newPassword } = req.body;
@@ -260,7 +270,11 @@ export const resetPassword = asyncHandler(async (req, res) => {
     throw new AppError('Token and newPassword are required', 400);
   }
 
-  await resetPasswordService(token, newPassword);
+  // resetPasswordService returns { user } with userId and tenantId
+  const { user } = await resetPasswordService(token, newPassword);
+
+  // Revoke all existing access tokens instantly (Redis key with TTL = token lifetime)
+  await revokeUser(user.tenantId.toString(), user._id.toString());
 
   res.status(200).json({
     status: 'success',

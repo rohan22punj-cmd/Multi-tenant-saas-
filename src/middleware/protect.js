@@ -6,11 +6,10 @@
  *    (format: "Bearer <token>")
  * 2. Verifies the JWT signature and checks that it hasn't expired
  *    using the ACCESS secret (a refresh token will fail here).
- * 3. Takes userId, tenantId, roleId, permissions directly from the
- *    token payload — NO database call. This is fast (no extra round-
- *    trip) but means a deactivated user keeps access for up to
- *    15 minutes until the token expires. That trade-off is intentional
- *    for Phase 2; we can add a revocation list later if needed.
+ * 3. Checks Redis revocation list (instant cutoff). If the token's
+ *    iat (issued-at) is <= the stored revocation timestamp, the token
+ *    is rejected with a generic 401. A token issued AFTER revocation
+ *    (fresh login) passes.
  * 4. Attaches req.user = { userId, tenantId, roleId, permissions }.
  * 5. Runs the rest of the request inside runWithTenant({ tenantId,
  *    userId }) so downstream code can call getTenantId().
@@ -18,11 +17,18 @@
  * SAFETY RULE:
  * tenantId must never be read from req.body, req.params, or req.query
  * anywhere in this project.
+ *
+ * TRADE-OFF:
+ * One fast Redis GET per protected request in exchange for instant revocation.
+ * No database call. If Redis is down, behavior is controlled by
+ * REVOCATION_FAIL_MODE (default: open = allow request with warning log).
  */
 
 import { verifyAccessToken } from '../utils/tokens.js';
 import AppError from '../utils/AppError.js';
 import { runWithTenant } from '../utils/tenantContext.js';
+import { isRevoked } from '../services/revocation.service.js';
+import logger from '../config/logger.js';
 
 const UNAUTHORIZED = 'Unauthorized';
 
@@ -43,7 +49,15 @@ const protect = async (req, _res, next) => {
     throw new AppError(UNAUTHORIZED, 401);
   }
 
-  // 3. Build req.user from token payload (no DB lookup)
+  // 3. Check Redis revocation list (instant cutoff)
+  //    If the token's iat <= stored revokedAt, it was issued before
+  //    the revocation → reject. Fresh tokens (iat > revokedAt) pass.
+  const revoked = await isRevoked(decoded);
+  if (revoked) {
+    throw new AppError(UNAUTHORIZED, 401);
+  }
+
+  // 4. Build req.user from token payload (no DB lookup)
   req.user = {
     userId: decoded.userId,
     tenantId: decoded.tenantId,
@@ -51,7 +65,7 @@ const protect = async (req, _res, next) => {
     permissions: decoded.permissions || [],
   };
 
-  // 4. Run downstream inside async tenant context
+  // 5. Run downstream inside async tenant context
   runWithTenant(
     { tenantId: decoded.tenantId, userId: decoded.userId },
     () => next()

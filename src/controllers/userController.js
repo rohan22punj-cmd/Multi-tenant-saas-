@@ -23,9 +23,20 @@
  * clearing refreshTokenHash means the user cannot exchange their refresh
  * token for a new access token. So worst case, a deactivated user has 15
  * minutes of residual access, then they are out.
- *   -- ponytail: access tokens are still valid up to 15 min post-deactivation;
- *      add a token revocation list (e.g. Redis blocklist) if near-instant
- *      cutoff is required.
+ *
+ * NOW WITH INSTANT REVOCATION:
+ * We also store a Redis key "revoked:{tenantId}:{userId}" with the current
+ * timestamp and TTL = access token lifetime (15m). protect.js checks this
+ * on every request. The token's iat (issued-at) is compared: if iat <= revokedAt,
+ * the token was issued before revocation → reject. A fresh login after revocation
+ * (iat > revokedAt) works.
+ *
+ * EXCEPTION — Redis down:
+ * If Redis is unavailable, REVOCATION_FAIL_MODE controls behavior:
+ * - fail-open (default): allow the request, log a loud warning. The database
+ *   still blocks deactivated users at login/refresh, and the token expires
+ *   in ≤15m anyway.
+ * - fail-closed: return 401.
  *
  * WHY THE LAST-ADMIN RULE EXISTS:
  * If an admin deactivates the only other admin, no one with USER_MANAGE can
@@ -40,6 +51,7 @@ import Role from '../models/Role.js';
 import AppError from '../utils/AppError.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { PERMISSIONS } from '../constants/permissions.js';
+import { revokeUser } from '../services/revocation.service.js';
 
 /**
  * Per-tenant in-process mutex.
@@ -125,6 +137,9 @@ export const deactivate = asyncHandler(async (req, res) => {
   target.refreshTokenHash = null;
   await target.save();
 
+  // Revoke all existing access tokens instantly (Redis key with TTL = token lifetime)
+  await revokeUser(req.user.tenantId, target._id.toString());
+
   res.status(200).json({ id: target._id, isActive: target.isActive });
 });
 
@@ -159,11 +174,25 @@ export const reactivate = asyncHandler(async (req, res) => {
  *   e) If already has that role, return 200 (idempotent)
  *
  * On success, clears the user's refreshTokenHash to force re-login with new permissions.
+ * ALSO revokes all existing access tokens instantly via Redis revocation list (see below).
  *
- * TRADE-OFF: The user's CURRENT access token keeps the old permissions for up to 15
+ * TRADE-OFF (old): The user's CURRENT access token keeps the old permissions for up to 15
  * minutes (until it expires). We don't check the database on every request for performance.
- * This matters most when demoting someone — they retain elevated access briefly. To cut
- * that window, add a Redis token blocklist that protect.js checks on each request.
+ * This matters most when demoting someone — they retain elevated access briefly.
+ *
+ * NOW WITH INSTANT REVOCATION:
+ * We also store a Redis key "revoked:{tenantId}:{userId}" with the current
+ * timestamp and TTL = access token lifetime (15m). protect.js checks this
+ * on every request. The token's iat (issued-at) is compared: if iat <= revokedAt,
+ * the token was issued before revocation → reject. A fresh login after revocation
+ * (iat > revokedAt) works.
+ *
+ * EXCEPTION — Redis down:
+ * If Redis is unavailable, REVOCATION_FAIL_MODE controls behavior:
+ * - fail-open (default): allow the request, log a loud warning. The database
+ *   still blocks deactivated users at login/refresh, and the token expires
+ *   in ≤15m anyway.
+ * - fail-closed: return 401.
  */
 export const changeRole = asyncHandler(async (req, res) => {
   const targetId = req.params.id;
@@ -243,6 +272,9 @@ export const changeRole = asyncHandler(async (req, res) => {
   target.roleId = roleId;
   target.refreshTokenHash = null; // forces re-login to get new permissions
   await target.save();
+
+  // Revoke all existing access tokens instantly (Redis key with TTL = token lifetime)
+  await revokeUser(req.user.tenantId, target._id.toString());
 
   // Re-fetch to get the new role's name for the response
   const updatedUser = await User.findById(targetId).populate('roleId');
