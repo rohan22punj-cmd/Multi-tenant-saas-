@@ -85,8 +85,10 @@ export function getRedis() {
  * Compute the access token TTL in seconds from env (e.g. "15m" → 900).
  * jsonwebtoken accepts strings like "15m", "1h", "7d". We parse the same format.
  */
-function parseTokenTtl(expiresIn) {
-  if (typeof expiresIn === 'number') return expiresIn; // already in seconds
+function parseTokenTtl() {
+  // Read from env dynamically (tests may override it)
+  const expiresIn = env.jwt.accessExpiresIn;
+  if (typeof expiresIn === 'number') return expiresIn;
   const match = String(expiresIn).match(/^(\d+)([smhd])$/);
   if (!match) return 15 * 60; // fallback 15m
   const value = parseInt(match[1], 10);
