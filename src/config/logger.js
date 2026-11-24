@@ -12,6 +12,17 @@
  * for colored, human-readable output so you don't have to squint
  * at raw JSON in your terminal.
  *
+ * SENSITIVE DATA REDACTION:
+ * Pino's redact option automatically removes sensitive fields from
+ * log output. We redact:
+ *   - req.headers.authorization (Bearer tokens)
+ *   - req.headers.cookie (session cookies)
+ *   - req.body.password, req.body.passwordHash, req.body.newPassword
+ *   - req.body.token, req.body.refreshToken, req.body.accessToken
+ *   - req.body.hash, req.body.tokenHash
+ *   - Any field containing "secret", "token", "password" in its name
+ * This prevents accidental logging of credentials, tokens, or hashes.
+ *
  * HOW IT DECIDES:
  * - NODE_ENV === 'development' → pretty-printed, colorized
  * - anything else (production, staging) → raw JSON (one line per log)
@@ -33,6 +44,25 @@ const isDev = env.nodeEnv === 'development';
 
 const logger = pino({
   level: isTest ? 'silent' : env.logLevel,
+  redact: {
+    paths: [
+      'req.headers.authorization',
+      'req.headers.cookie',
+      'req.body.password',
+      'req.body.passwordHash',
+      'req.body.newPassword',
+      'req.body.token',
+      'req.body.refreshToken',
+      'req.body.accessToken',
+      'req.body.hash',
+      'req.body.tokenHash',
+      'req.body.secret',
+      'req.body.secretKey',
+      'req.body.webhookSecret',
+      'res.headers["set-cookie"]',
+    ],
+    censor: '[REDACTED]',
+  },
   ...(isDev && {
     transport: {
       target: 'pino-pretty',
