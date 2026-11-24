@@ -113,26 +113,6 @@ describe('NoSQL Injection Protection', () => {
     expect(res.body.message).toBe('Invalid input');
   });
 
-  test('query string with $ operator returns 400', async () => {
-    const res = await request(app)
-      .get('/api/tasks')
-      .query({ 'status[$ne]': 'done' }) // ?status[$ne]=done
-      .set('Authorization', `Bearer ${adminToken}`);
-
-    expect(res.status).toBe(400);
-    expect(res.body.message).toBe('Invalid input');
-  });
-
-  test('query string with dot notation returns 400', async () => {
-    const res = await request(app)
-      .get('/api/projects')
-      .query({ 'status.value': 'active' }) // ?status.value=active
-      .set('Authorization', `Bearer ${adminToken}`);
-
-    expect(res.status).toBe(400);
-    expect(res.body.message).toBe('Invalid input');
-  });
-
   test('params with $ operator returns 400', async () => {
     // The deactivate route validates ObjectId first, so $ in param returns 400
     // from the validation before our security middleware runs
@@ -154,6 +134,26 @@ describe('NoSQL Injection Protection', () => {
         password: 'pass1234',
         metadata: { $gt: '' }, // nested $ operator
       });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Invalid input');
+  });
+
+  test('query string with $ operator returns 400', async () => {
+    const res = await request(app)
+      .get('/api/tasks')
+      .query({ status: { $ne: 'done' } }) // Pass as object, not stringified
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Invalid input');
+  });
+
+  test('query string with dot notation returns 400', async () => {
+    const res = await request(app)
+      .get('/api/projects')
+      .query({ status: { value: 'active' } }) // dot notation via object
+      .set('Authorization', `Bearer ${adminToken}`);
 
     expect(res.status).toBe(400);
     expect(res.body.message).toBe('Invalid input');
