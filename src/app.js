@@ -7,13 +7,16 @@
  * This separation is a standard pattern for testable Express apps.
  *
  * MIDDLEWARE ORDER (top → bottom):
- * 1. requestId    — tag each request with a UUID before anything else
- * 2. helmet       — security headers
- * 3. cors         — cross-origin
- * 4. express.json — body parsing
- * 5. requestLogger — one log line per request (after finish)
- * 6. routes + rate limiters
- * 7. errorHandler — must be last
+ * 1. trust proxy     — trust X-Forwarded-For for correct IP behind proxies
+ * 2. requestId       — tag each request with a UUID before anything else
+ * 3. helmet          — security headers (CSP, X-Powered-By removed, etc.)
+ * 4. cors            — strict allowlist from CORS_ORIGINS
+ * 5. express.json    — body parsing with size limit (BODY_LIMIT)
+ * 6. noSqlInjection  — reject MongoDB operator keys ($, .) in body/query/params
+ * 7. requestLogger   — one log line per request (after finish)
+ * 8. routes + rate limiters
+ * 9. notFound        — JSON 404 for unknown routes
+ * 10. errorHandler   — must be last
  */
 
 import express from 'express';
@@ -26,6 +29,8 @@ import path from 'node:path';
 import requestId from './middleware/requestId.js';
 import requestLogger from './middleware/requestLogger.js';
 import errorHandler from './utils/errorHandler.js';
+import noSqlInjectionProtection from './middleware/security.js';
+import notFoundHandler from './middleware/notFound.js';
 import authRoutes from './routes/authRoutes.js';
 import protect from './middleware/protect.js';
 import tenantContextMiddleware from './middleware/tenantContext.js';
@@ -36,20 +41,143 @@ import userRoutes from './routes/userRoutes.js';
 import projectRoutes from './routes/projectRoutes.js';
 import taskRoutes from './routes/taskRoutes.js';
 import activityRoutes from './routes/activityRoutes.js';
+import env from './config/env.js';
 
 const app = express();
 
-// ─── Request ID (must be first so all downstream middleware can use req.id) ───
+// ─── Trust Proxy (must be first for correct req.ip behind proxies) ───
+// TRUST_PROXY=0 (default): no proxy, req.ip is socket address
+// TRUST_PROXY=1: one proxy (Render, Heroku), trust first X-Forwarded-For
+// TRUST_PROXY=2: two proxies (Cloudflare + Render), trust second-to-last
+// REQUIRED for correct rate limiting IP behind any load balancer/CDN.
+app.set('trust proxy', env.trustProxy);
+
+// ─── Request ID (must be early so all downstream middleware can use req.id) ───
 app.use(requestId);
 
-// ─── Security & parsing ───
-// Serve OpenAPI docs ONLY in non-production OR when ENABLE_API_DOCS=true
+// ─── Helmet: security headers (CSP, X-Powered-By removed, HSTS, etc.) ───
+// OpenAPI docs exception handled below; API gets strict CSP (no inline scripts/styles)
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      'default-src': ["'self'"],
+      'script-src': ["'self'"],
+      'style-src': ["'self'"],
+      'img-src': ["'self'", 'data:'],
+      'font-src': ["'self'"],
+      'object-src': ["'none'"],
+      'base-uri': ["'self'"],
+      'form-action': ["'self'"],
+      'frame-ancestors': ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // allow swagger-ui to load
+  crossOriginResourcePolicy: { policy: 'same-origin' },
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true }, // 1 year
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  noSniff: true,
+  xssFilter: true,
+}));
+
+// Remove X-Powered-By header completely
+app.use((_req, res, next) => {
+  res.removeHeader('X-Powered-By');
+  next();
+});
+
+// ─── CORS: strict allowlist from CORS_ORIGINS ───
+// In production, if CORS_ORIGINS is empty, block all cross-origin requests.
+// In development, allow all if not explicitly set.
+const isProduction = process.env.NODE_ENV === 'production';
+const corsOrigins = env.corsOrigins;
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests (no origin header) like curl, mobile apps
+    if (!origin) return callback(null, true);
+    if (!isProduction && corsOrigins.length === 0) {
+      // Development: allow all if not explicitly configured
+      return callback(null, true);
+    }
+    if (corsOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS: Origin not allowed'));
+  },
+  credentials: false, // we use Bearer tokens, not cookies
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 86400, // 24 hours
+};
+app.use(cors(corsOptions));
+
+// ─── Body Parsing with Size Limit ───
+// BODY_LIMIT from env (default 100kb). Returns 413 with clean error shape.
+app.use(express.json({ limit: env.bodyLimit }));
+
+// ─── NoSQL Injection Protection ───
+// Rejects any request with $ or . in keys (body, query, params)
+// Must run AFTER body parsing but BEFORE routes
+app.use(noSqlInjectionProtection);
+
+// ─── Request Logging (after parsing, before routes) ───
+app.use(requestLogger);
+
+// ─── Health Check (no auth, no rate limit) ───
+app.get('/health', (_req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
+// ─── Rate Limit all /api routes ───
+app.use('/api', generalLimiter);
+
+// ─── Auth Routes (signup, login, refresh, logout) ───
+// Add Cache-Control: no-store for auth responses
+app.use('/api/auth', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+}, authRoutes);
+
+// ─── Stripe Webhook Route (if exists) — raw body parser with own limit
+// This must come BEFORE express.json for this specific route
+// If you add a Stripe webhook, uncomment and adjust:
+// app.post('/api/billing/webhook', express.raw({ type: 'application/json', limit: '1mb' }), webhookHandler);
+
+// ─── Demo RBAC Routes (test-only, to delete later) ───
+app.use('/api/demo', rbacDemoRoutes);
+
+// ─── User Management Routes (deactivate / reactivate) ───
+app.use('/api/users', userRoutes);
+
+// ─── Project Routes (all need protect + requirePermission) ───
+app.use('/api/projects', projectRoutes);
+
+// ─── Task Routes (mounted at /api) ───
+app.use('/api', taskRoutes);
+
+// ─── Activity Feed (read-only, user:manage) ───
+app.use('/api/activity', activityRoutes);
+
+// ─── Protected Test Route ───
+app.get('/api/me', protect, tenantContextMiddleware, (req, res) => {
+    const contextTenantId = getTenantId();
+    res.status(200).json({
+        status: 'success',
+        data: {
+            userId: req.user.userId,
+            tenantId: req.user.tenantId,
+            contextTenantId,
+            permissions: req.user.permissions,
+        },
+    });
+});
+
+// ─── Swagger UI (relaxed CSP only for /api/docs) ───
 const enableApiDocs = process.env.NODE_ENV !== 'production' || process.env.ENABLE_API_DOCS === 'true';
 if (enableApiDocs) {
   const specPath = path.resolve('src/docs/openapi.yaml');
   const spec = YAML.parse(fs.readFileSync(specPath, 'utf8'));
-  // Relax helmet's script-src for Swagger UI inline scripts ONLY on /api/docs
-  // swaggerUi.serve needs to handle both /api/docs and /api/docs/
   app.use('/api/docs', helmet({
     contentSecurityPolicy: {
       directives: {
@@ -66,65 +194,17 @@ if (enableApiDocs) {
     res.send(spec);
   });
 }
-// Apply helmet to all other routes (without the relaxed CSP)
-app.use((req, res, next) => {
-  if (!req.path.startsWith('/api/docs')) {
-    helmet()(req, res, next);
-  } else {
-    next();
-  }
-});
-app.use(cors()); // allows cross-origin requests (configurable later)
-app.use(express.json()); // parses JSON request bodies
 
-// ─── Request logging (after parsing, before routes) ───
-app.use(requestLogger);
-
-// ─── Health check (no auth, no rate limit) ───
-app.get('/health', (_req, res) => {
-    res.status(200).json({ status: 'ok' });
+// ─── Cache-Control: no-store on billing responses ───
+app.use('/api/billing', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
 });
 
-// ─── Rate limit all /api routes ───
-app.use('/api', generalLimiter);
+// ─── 404 Handler (must be before errorHandler) ───
+app.use(notFoundHandler);
 
-// ─── Auth routes (signup, login, refresh, logout) ───
-app.use('/api/auth', authRoutes);
-
-// ─── Demo RBAC routes (test-only, to delete later) ───
-app.use('/api/demo', rbacDemoRoutes);
-
-// ─── User management routes (deactivate / reactivate) ───
-app.use('/api/users', userRoutes);
-
-// ─── Project routes (all need protect + requirePermission) ───
-app.use('/api/projects', projectRoutes);
-
-// ─── Task routes (mounted at /api: covers /api/tasks/* and
-//     /api/projects/:projectId/tasks) ───
-app.use('/api', taskRoutes);
-
-// ─── Activity feed (read-only, user:manage) ───
-app.use('/api/activity', activityRoutes);
-
-// ─── Protected test route ───
-// Demonstrates that protect + tenantContext work together.
-// In Phase 3+, all resource routes (projects, tasks) will use
-// the same middleware chain.
-app.get('/api/me', protect, tenantContextMiddleware, (req, res) => {
-    // getTenantId() reads from AsyncLocalStorage, proving context works
-    const contextTenantId = getTenantId();
-    res.status(200).json({
-        status: 'success',
-        data: {
-            userId: req.user.userId,
-            tenantId: req.user.tenantId,
-            contextTenantId,
-            permissions: req.user.permissions,
-        },
-    });
-});
-// ─── Central error handler (must be LAST middleware) ───
+// ─── Central Error Handler (must be LAST middleware) ───
 app.use(errorHandler);
 
 export default app;
