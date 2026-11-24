@@ -35,6 +35,16 @@ const env = {
     windowMs: parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
     max: parseInt(process.env.LOGIN_RATE_LIMIT_MAX, 10) || 10,
   },
+  // Body size limit for express.json (default 100kb)
+  bodyLimit: process.env.BODY_LIMIT || '100kb',
+  // CORS origins: comma-separated list (e.g. "https://app.example.com,https://admin.example.com")
+  // In production, if empty, all cross-origin requests are blocked
+  corsOrigins: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()) : [],
+  // Number of proxies to trust (for rate limiting IP behind load balancers)
+  // Set to 1 for Render, 2 for Cloudflare + Render, etc. Default 0 = no proxy trust
+  trustProxy: parseInt(process.env.TRUST_PROXY, 10) || 0,
+  // Fail mode for revocation when Redis is down
+  revocationFailMode: (process.env.REVOCATION_FAIL_MODE || 'open').toLowerCase(),
 };
 
 export default env;
