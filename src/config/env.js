@@ -23,6 +23,7 @@ const env = {
   stripe: {
     secretKey: process.env.STRIPE_SECRET_KEY,
     webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    proPriceId: process.env.STRIPE_PRO_PRICE_ID,
   },
   logLevel: process.env.LOG_LEVEL || 'info',
   inviteExpiryDays: parseInt(process.env.INVITE_EXPIRY_DAYS, 10) || 7,
