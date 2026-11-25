@@ -32,6 +32,7 @@ import errorHandler from './utils/errorHandler.js';
 import noSqlInjectionProtection from './middleware/security.js';
 import notFoundHandler from './middleware/notFound.js';
 import authRoutes from './routes/authRoutes.js';
+import billingRoutes from './routes/billingRoutes.js';
 import protect from './middleware/protect.js';
 import tenantContextMiddleware from './middleware/tenantContext.js';
 import { getTenantId } from './utils/tenantContext.js';
@@ -132,6 +133,8 @@ app.get('/health', (_req, res) => {
 // ─── Rate Limit all /api routes ───
 app.use('/api', generalLimiter);
 
+import billingRoutes from './routes/billingRoutes.js';
+
 // ─── Auth Routes (signup, login, refresh, logout) ───
 // Add Cache-Control: no-store for auth responses
 app.use('/api/auth', (req, res, next) => {
@@ -139,10 +142,23 @@ app.use('/api/auth', (req, res, next) => {
   next();
 }, authRoutes);
 
-// ─── Stripe Webhook Route (if exists) — raw body parser with own limit
-// This must come BEFORE express.json for this specific route
-// If you add a Stripe webhook, uncomment and adjust:
-// app.post('/api/billing/webhook', express.raw({ type: 'application/json', limit: '1mb' }), webhookHandler);
+// ─── Stripe Webhook Route — raw body parser with own limit
+// This MUST come BEFORE express.json so the raw body is available
+// for signature verification. express.raw() parses the raw body
+// without consuming it, so express.json() can still parse for
+// other routes. Comment: this is the ONLY route that needs raw body.
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res, next) => {
+  // Import webhook handler dynamically to avoid circular deps
+  const { handleStripeWebhook } = await import('./controllers/webhookController.js');
+  handleStripeWebhook(req, res, next);
+});
+
+// ─── Billing Routes (Pro upgrade, portal, status) ───
+// Add Cache-Control: no-store for billing responses
+app.use('/api/billing', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+}, billingRoutes);
 
 // ─── Demo RBAC Routes (test-only, to delete later) ───
 app.use('/api/demo', rbacDemoRoutes);
