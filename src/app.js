@@ -142,16 +142,14 @@ app.use('/api/auth', (req, res, next) => {
   next();
 }, authRoutes);
 
+import webhookController from './controllers/webhookController.js';
+
 // ─── Stripe Webhook Route — raw body parser with own limit
 // This MUST come BEFORE express.json so the raw body is available
 // for signature verification. express.raw() parses the raw body
 // without consuming it, so express.json() can still parse for
 // other routes. Comment: this is the ONLY route that needs raw body.
-app.post('/api/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res, next) => {
-  // Import webhook handler dynamically to avoid circular deps
-  const { handleStripeWebhook } = await import('./controllers/webhookController.js');
-  handleStripeWebhook(req, res, next);
-});
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }), webhookController.handleStripeWebhook);
 
 // ─── Billing Routes (Pro upgrade, portal, status) ───
 // Add Cache-Control: no-store for billing responses
