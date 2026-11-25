@@ -33,6 +33,23 @@ const tenantSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    stripeSubscriptionId: {
+      type: String,
+      default: null,
+    },
+    subscriptionStatus: {
+      type: String,
+      enum: ['none', 'active', 'past_due', 'canceled'],
+      default: 'none',
+    },
+    currentPeriodEnd: {
+      type: Date,
+      default: null,
+    },
+    lastStripeEventAt: {
+      type: Date,
+      default: null,
+    },
     /**
      * Number of NON-ARCHIVED projects this tenant currently has.
      *
