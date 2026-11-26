@@ -135,8 +135,6 @@ app.get('/health', (_req, res) => {
 // ─── Rate Limit all /api routes ───
 app.use('/api', generalLimiter);
 
-import billingRoutes from './routes/billingRoutes.js';
-
 // ─── Auth Routes (signup, login, refresh, logout) ───
 // Add Cache-Control: no-store for auth responses
 app.use('/api/auth', (req, res, next) => {
