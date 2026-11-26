@@ -33,6 +33,7 @@ import noSqlInjectionProtection from './middleware/security.js';
 import notFoundHandler from './middleware/notFound.js';
 import authRoutes from './routes/authRoutes.js';
 import billingRoutes from './routes/billingRoutes.js';
+import roleRoutes from './routes/roleRoutes.js';
 import protect from './middleware/protect.js';
 import tenantContextMiddleware from './middleware/tenantContext.js';
 import { getTenantId } from './utils/tenantContext.js';
@@ -43,6 +44,7 @@ import projectRoutes from './routes/projectRoutes.js';
 import taskRoutes from './routes/taskRoutes.js';
 import activityRoutes from './routes/activityRoutes.js';
 import env from './config/env.js';
+import webhookController from './controllers/webhookController.js';
 
 const app = express();
 
@@ -157,6 +159,13 @@ app.use('/api/billing', (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   next();
 }, billingRoutes);
+
+// ─── Role Routes (custom roles CRUD) ───
+// Add Cache-Control: no-store for role responses
+app.use('/api/roles', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+}, roleRoutes);
 
 // ─── Demo RBAC Routes (test-only, to delete later) ───
 app.use('/api/demo', rbacDemoRoutes);

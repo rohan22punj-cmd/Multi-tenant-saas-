@@ -113,22 +113,20 @@ export const deactivate = asyncHandler(async (req, res) => {
     }
   }
 
-  // Rule b: cannot deactivate the last active user who holds USER_MANAGE
-  // We only need to check this if the target is currently active.
+  // Rule b: cannot deactivate the last active SYSTEM ADMIN
+  // We only check the system admin role (isSystemRole: true), not any role with USER_MANAGE.
   if (target.isActive) {
-    // Find all roles in this tenant that have USER_MANAGE
-    const adminRoles = await Role.find({ permissions: PERMISSIONS.USER_MANAGE }).lean();
-    const adminRoleIds = adminRoles.map((r) => r._id.toString());
+    const systemAdminRole = await Role.findOne({ isSystemRole: true, name: 'admin' }).lean();
+    if (systemAdminRole && target.roleId.toString() === systemAdminRole._id.toString()) {
+      const remainingAdminCount = await User.countDocuments({
+        _id: { $ne: target._id },
+        isActive: true,
+        roleId: systemAdminRole._id,
+      });
 
-    // Count active users (excluding the one we're about to deactivate) with an admin role
-    const remainingAdminCount = await User.countDocuments({
-      _id: { $ne: target._id },
-      isActive: true,
-      roleId: { $in: adminRoleIds },
-    });
-
-    if (remainingAdminCount === 0 && adminRoleIds.includes(target.roleId.toString())) {
-      throw new AppError('Cannot deactivate the last admin', 409);
+      if (remainingAdminCount === 0) {
+        throw new AppError('Cannot deactivate the last admin', 409);
+      }
     }
   }
 
@@ -247,20 +245,17 @@ export const changeRole = asyncHandler(async (req, res) => {
     throw new AppError('Forbidden', 403);
   }
 
-  // Rule d: last-admin check — only matters if target currently IS an admin and we're demoting
-  const targetCurrentlyHasUserManage = currentRole.permissions.includes(PERMISSIONS.USER_MANAGE);
-  const newRoleHasUserManage = newRole.permissions.includes(PERMISSIONS.USER_MANAGE);
+  // Rule d: last-admin check — only matters if target currently IS a SYSTEM ADMIN and we're demoting
+  const systemAdminRole = await Role.findOne({ isSystemRole: true, name: 'admin' }).lean();
+  const targetIsSystemAdmin = systemAdminRole && target.roleId.toString() === systemAdminRole._id.toString();
+  const newRoleIsSystemAdmin = systemAdminRole && newRole._id.toString() === systemAdminRole._id.toString();
 
-  if (targetCurrentlyHasUserManage && !newRoleHasUserManage && target.isActive) {
-    // Find all roles in this tenant that have USER_MANAGE
-    const adminRoles = await Role.find({ permissions: PERMISSIONS.USER_MANAGE }).lean();
-    const adminRoleIds = adminRoles.map((r) => r._id.toString());
-
-    // Count OTHER active users with an admin role (excluding the target)
+  if (targetIsSystemAdmin && !newRoleIsSystemAdmin && target.isActive) {
+    // Count OTHER active users with the system admin role (excluding the target)
     const remainingAdminCount = await User.countDocuments({
       _id: { $ne: target._id },
       isActive: true,
-      roleId: { $in: adminRoleIds },
+      roleId: systemAdminRole._id,
     });
 
     if (remainingAdminCount === 0) {
