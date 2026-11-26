@@ -144,8 +144,6 @@ app.use('/api/auth', (req, res, next) => {
   next();
 }, authRoutes);
 
-import webhookController from './controllers/webhookController.js';
-
 // ─── Stripe Webhook Route — raw body parser with own limit
 // This MUST come BEFORE express.json so the raw body is available
 // for signature verification. express.raw() parses the raw body
