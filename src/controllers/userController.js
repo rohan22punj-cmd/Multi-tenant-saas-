@@ -64,22 +64,35 @@ import { revokeUser } from '../services/revocation.service.js';
  * LIMIT: this only serializes requests handled by this Node process. If the
  * API runs on several instances, replace it with a distributed lock (Redis
  * SET NX / MongoDB lease) — the call sites stay the same.
+ *
+ * HOW IT WORKS:
+ * Each tenant gets an AsyncMutex that chains tasks sequentially.
+ * The mutex is created once per tenant and reused, avoiding the race
+ * condition where two concurrent requests both see an empty lock map.
  */
+
+class AsyncMutex {
+  constructor() {
+    this.queue = Promise.resolve();
+  }
+
+  run(task) {
+    const run = this.queue.then(() => task());
+    this.queue = this.queue.catch(() => {}).then(() => task());
+    return run;
+  }
+}
+
 const tenantLocks = new Map();
 
 function withTenantLock(tenantId, task) {
   const key = String(tenantId);
-  const previous = tenantLocks.get(key) || Promise.resolve();
-  const run = previous.then(() => task());
-
-  // Keep the chain alive whether the task fulfilled or rejected.
-  const tail = run.catch(() => {});
-  tenantLocks.set(key, tail);
-  tail.then(() => {
-    if (tenantLocks.get(key) === tail) tenantLocks.delete(key);
-  });
-
-  return run;
+  let mutex = tenantLocks.get(key);
+  if (!mutex) {
+    mutex = new AsyncMutex();
+    tenantLocks.set(key, mutex);
+  }
+  return mutex.run(task);
 }
 
 /**

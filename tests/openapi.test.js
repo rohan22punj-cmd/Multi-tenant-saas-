@@ -84,6 +84,21 @@ describe('OpenAPI Spec Validation', () => {
         identifiers: ['/'],  // Only route is /
         routes: ['/']
       },
+      {
+        path: '/api/billing',
+        identifiers: ['/checkout', '/portal'],  // Unique to billingRoutes
+        routes: ['/checkout', '/portal', '/']
+      },
+      {
+        path: '/api/roles',
+        identifiers: ['/permissions'],  // Unique to roleRoutes
+        routes: ['/', '/permissions', '/:id']
+      },
+      {
+        path: '/api/webhooks',
+        identifiers: ['/stripe'],  // Unique to webhook
+        routes: ['/stripe']
+      },
     ];
 
     // For each mounted router in the stack, try to match it to a known mount
